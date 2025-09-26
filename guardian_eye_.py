@@ -65,7 +65,6 @@ def generate_realistic_aviation_data(n_flights: int = 10000) -> pd.DataFrame:
         "AMD": {"name": "Ahmedabad", "lat": 23.0726, "lng": 72.6263, "traffic": "Medium"},
         "PNQ": {"name": "Pune", "lat": 18.5822, "lng": 73.9197, "traffic": "Medium"},
         "JAI": {"name": "Jaipur", "lat": 26.8247, "lng": 75.8127, "traffic": "Medium"},
-        # Extra airports you asked to include earlier:
         "GOI": {"name": "Goa", "lat": 15.3800, "lng": 73.8314, "traffic": "Medium"},
         "TRV": {"name": "Trivandrum", "lat": 8.4821, "lng": 76.9209, "traffic": "Medium"},
         "IXB": {"name": "Bagdogra", "lat": 26.6812, "lng": 88.3286, "traffic": "Low"},
@@ -75,7 +74,6 @@ def generate_realistic_aviation_data(n_flights: int = 10000) -> pd.DataFrame:
     }
 
     def reg() -> str:
-        # VT-XXX registrations
         return "VT-" + "".join(np.random.choice(list("ABCDEFGHIJKLMNOPQRSTUVWXYZ"), 3))
 
     flights = []
@@ -100,7 +98,6 @@ def generate_realistic_aviation_data(n_flights: int = 10000) -> pd.DataFrame:
         cycles = hours / 1.5
         last_maint_days = np.random.uniform(1, 180)
 
-        # Weather (seasonal)
         monsoon = 1.5 if sched_dep.month in [6, 7, 8, 9] else 1.0
         winter_fog = 1.3 if (sched_dep.month in [12, 1, 2] and origin in ["DEL", "JAI"]) else 1.0
         weather_score = min(1.0, np.random.uniform(0.2, 1.0) * monsoon * winter_fog)
@@ -180,7 +177,6 @@ def generate_realistic_aviation_data(n_flights: int = 10000) -> pd.DataFrame:
                 "origin_lng": airports[origin]["lng"],
                 "dest_lat": airports[dest]["lat"],
                 "dest_lng": airports[dest]["lng"],
-                # pseudo in-flight position along great-circle-ish straight line
                 "current_lat": airports[origin]["lat"] + (airports[dest]["lat"] - airports[origin]["lat"]) * np.random.random(),
                 "current_lng": airports[origin]["lng"] + (airports[dest]["lng"] - airports[origin]["lng"]) * np.random.random(),
                 "altitude": int(np.random.randint(25000, 42000) if status == "IN-FLIGHT" else 0),
@@ -193,8 +189,7 @@ def generate_realistic_aviation_data(n_flights: int = 10000) -> pd.DataFrame:
             }
         )
 
-    df = pd.DataFrame(flights)
-    return df
+    return pd.DataFrame(flights)
 
 
 # ---------------------------------------------------------------------
@@ -225,19 +220,37 @@ def ensure_data_and_models():
     else:
         df = pd.read_csv(DATA_CSV, parse_dates=["scheduled_departure", "actual_departure"])
 
-    # Train models if missing
+    # --- ensure numeric ---
+    X_full = df[FEATURE_COLUMNS].apply(pd.to_numeric, errors="coerce").fillna(0.0).astype(float)
+
+    # --- adaptive incident threshold ---
+    thresholds = [0.5, 0.45, 0.4, 0.35, 0.30]
+    y_incident = None
+    for t in thresholds:
+        y_try = (df["incident_probability"].astype(float) > t).astype(int)
+        vc = y_try.value_counts()
+        if len(vc.index) == 2 and min(vc.values) >= 0.03 * len(y_try):
+            y_incident = y_try
+            break
+    if y_incident is None:
+        q = float(df["incident_probability"].quantile(0.7))
+        y_incident = (df["incident_probability"].astype(float) > q).astype(int)
+
+    y_delay = pd.to_numeric(df["delay_minutes"], errors="coerce").fillna(0).astype(int)
+
     need_train = not (os.path.exists(INCIDENT_PKL) and os.path.exists(DELAY_PKL) and os.path.exists(FEATURES_PKL))
     if need_train:
-        X = df[FEATURE_COLUMNS]
-        y_incident = (df["incident_probability"] > 0.5).astype(int)
-        y_delay = df["delay_minutes"]
+        X_train, X_test, y_inc_train, y_inc_test = train_test_split(
+            X_full, y_incident, test_size=0.2, random_state=42, stratify=y_incident
+        )
+        _, _, y_d_train, y_d_test = train_test_split(
+            X_full, y_delay, test_size=0.2, random_state=42
+        )
 
-        X_train, X_test, y_inc_train, y_inc_test = train_test_split(X, y_incident, test_size=0.2, random_state=42)
-        _, _, y_d_train, y_d_test = train_test_split(X, y_delay, test_size=0.2, random_state=42)
-
-        clf = RandomForestClassifier(n_estimators=200, random_state=42)
+        clf = RandomForestClassifier(n_estimators=200, random_state=42, class_weight="balanced", n_jobs=-1)
         clf.fit(X_train, y_inc_train)
-        reg = RandomForestRegressor(n_estimators=200, random_state=42)
+
+        reg = RandomForestRegressor(n_estimators=200, random_state=42, n_jobs=-1)
         reg.fit(X_train, y_d_train)
 
         with open(INCIDENT_PKL, "wb") as f:
@@ -247,7 +260,6 @@ def ensure_data_and_models():
         with open(FEATURES_PKL, "wb") as f:
             pickle.dump(FEATURE_COLUMNS, f)
 
-    # Load models
     with open(INCIDENT_PKL, "rb") as f:
         clf = pickle.load(f)
     with open(DELAY_PKL, "rb") as f:
@@ -255,41 +267,32 @@ def ensure_data_and_models():
 
     return df, clf, reg
 
+
 # ---------------------------------------------------------------------
 # 3D Globe (Plotly)
 # ---------------------------------------------------------------------
 def globe_with_aircraft(df: pd.DataFrame) -> go.Figure:
-    # Sphere mesh
     u = np.linspace(0, 2 * np.pi, 50)
     v = np.linspace(0, np.pi, 50)
-    x = 1.0 * np.outer(np.cos(u), np.sin(v))
-    y = 1.0 * np.outer(np.sin(u), np.sin(v))
-    z = 1.0 * np.outer(np.ones_like(u), np.cos(v))
+    x = np.outer(np.cos(u), np.sin(v))
+    y = np.outer(np.sin(u), np.sin(v))
+    z = np.outer(np.ones_like(u), np.cos(v))
 
-    # Scale aircraft lat/lng to sphere
     def latlng_to_xyz(lat, lng, r=1.02):
         lat = np.deg2rad(lat)
         lng = np.deg2rad(lng)
-        X = r * np.cos(lat) * np.cos(lng)
-        Y = r * np.cos(lat) * np.sin(lng)
-        Z = r * np.sin(lat)
-        return X, Y, Z
+        return r * np.cos(lat) * np.cos(lng), r * np.cos(lat) * np.sin(lng), r * np.sin(lat)
 
-    # Marker colors by risk
     color_map = {"CRITICAL": "red", "HIGH": "orange", "MEDIUM": "dodgerblue", "LOW": "limegreen"}
-    lats = df["current_lat"].values
-    lngs = df["current_lng"].values
+    lats, lngs = df["current_lat"].values, df["current_lng"].values
     colors = df["risk_level"].map(color_map).values
-
     Xp, Yp, Zp = latlng_to_xyz(lats, lngs)
 
     fig = go.Figure(
         data=[
             go.Surface(x=x, y=y, z=z, opacity=0.25, showscale=False, colorscale="Blues"),
             go.Scatter3d(
-                x=Xp,
-                y=Yp,
-                z=Zp,
+                x=Xp, y=Yp, z=Zp,
                 mode="markers",
                 marker=dict(size=4, color=colors),
                 text=df.apply(lambda r: f"{r['tail_number']} • {r['airline']} • {r['aircraft_type']}", axis=1),
@@ -298,129 +301,22 @@ def globe_with_aircraft(df: pd.DataFrame) -> go.Figure:
         ]
     )
     fig.update_layout(
-        scene=dict(
-            xaxis=dict(visible=False),
-            yaxis=dict(visible=False),
-            zaxis=dict(visible=False),
-            aspectmode="data",
-        ),
+        scene=dict(xaxis=dict(visible=False), yaxis=dict(visible=False), zaxis=dict(visible=False), aspectmode="data"),
         margin=dict(l=0, r=0, t=0, b=0),
         paper_bgcolor="rgba(0,0,0,0)",
     )
     return fig
+
 
 # ---------------------------------------------------------------------
 # Prediction helpers
 # ---------------------------------------------------------------------
 def run_predictions(df_row: pd.Series, clf, reg) -> dict:
     X = df_row[FEATURE_COLUMNS].values.reshape(1, -1)
-    inc_proba = float(clf.predict_proba(X)[0, 1])
-    delay_pred = float(reg.predict(X)[0])
-    return {"incident_probability": inc_proba, "predicted_delay_minutes": delay_pred}
-
-# ---------------------------------------------------------------------
-# UI
-# ---------------------------------------------------------------------
-def app():
-    st.markdown(
-        """
-        <style>
-        .block-container {padding-top: 1rem;}
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    st.markdown("## 🛡️ Guardian Eye — Aviation Operations Center")
-
-    df, clf, reg = ensure_data_and_models()
-
-    # Sidebar filters
-    st.sidebar.header("🎛️ Aircraft Selection")
-    airlines = ["All Airlines"] + sorted(df["airline"].unique().tolist())
-    sel_airline = st.sidebar.selectbox("Airline", airlines)
-
-    sub = df.copy()
-    if sel_airline != "All Airlines":
-        sub = sub[sub["airline"] == sel_airline]
-
-    types = ["All Types"] + sorted(sub["aircraft_type"].unique().tolist())
-    sel_type = st.sidebar.selectbox("Aircraft Type", types)
-    if sel_type != "All Types":
-        sub = sub[sub["aircraft_type"] == sel_type]
-
-    tails = ["All Aircraft"] + sorted(sub["tail_number"].unique().tolist())
-    sel_tail = st.sidebar.selectbox("Tail Number", tails)
-
-    # Top KPI row
-    k1, k2, k3, k4 = st.columns(4)
-    with k1:
-        st.metric("Total Aircraft", len(sub))
-    with k2:
-        st.metric("In Flight", int((sub["status"] == "IN-FLIGHT").sum()))
-    with k3:
-        st.metric("Critical Risk", int((sub["risk_level"] == "CRITICAL").sum()))
-    with k4:
-        st.metric("Avg Incident Risk", f"{sub['incident_probability'].mean() * 100:.1f}%")
-
-    # Layout: globe | details
-    c1, c2 = st.columns([2, 1])
-    with c1:
-        st.subheader("🌐 Global Aircraft Tracking")
-        fig = globe_with_aircraft(sub.sample(min(300, len(sub))) if len(sub) > 300 else sub)
-        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
-
-        st.subheader("📡 Active Aircraft Monitor")
-        show_cols = ["tail_number", "airline", "aircraft_type", "status", "risk_level", "incident_probability", "delay_minutes"]
-        table = sub.sort_values("incident_probability", ascending=False)[show_cols].copy()
-        table["incident_probability"] = (table["incident_probability"] * 100).round(1)
-        table.rename(columns={"incident_probability": "Risk %", "delay_minutes": "Delay (min)", "tail_number": "Tail"}, inplace=True)
-        st.dataframe(table.head(50), use_container_width=True, height=420)
-
-    with c2:
-        st.subheader("✈️ Aircraft Details")
-        if sel_tail != "All Aircraft" and sel_tail in sub["tail_number"].values:
-            row = sub[sub["tail_number"] == sel_tail].iloc[0]
-            preds = run_predictions(row, clf, reg)
-
-            st.markdown(f"**Tail:** {row['tail_number']}  \n**Airline:** {row['airline']}  \n**Type:** {row['aircraft_type']}  \n**Status:** {row['status']}")
-            st.markdown("---")
-            st.metric("Predicted Delay (min)", f"{preds['predicted_delay_minutes']:.0f}")
-            st.metric("Incident Probability", f"{preds['incident_probability']*100:.1f}%")
-            st.markdown("---")
-
-            st.markdown("**Health Metrics**")
-            m1, m2 = st.columns(2)
-            with m1:
-                st.progress(int(row["engine_health"]), text=f"Engine Health {row['engine_health']:.1f}%")
-                st.progress(int(row["structural_integrity"]), text=f"Structural {row['structural_integrity']:.1f}%")
-            with m2:
-                st.progress(int(row["avionics_status"]), text=f"Avionics {row['avionics_status']:.1f}%")
-                st.progress(int(row["maintenance_score"]), text=f"Maintenance {row['maintenance_score']:.1f}%")
-
-            st.markdown("---")
-            st.markdown("**Risk Breakdown**")
-            rb = pd.DataFrame(
-                {
-                    "Risk Factor": ["Technical", "Human", "Environmental"],
-                    "Score": [row["technical_risk"], row["human_risk"], row["environmental_risk"]],
-                }
-            )
-            st.bar_chart(rb.set_index("Risk Factor"))
-        else:
-            st.info("Select a specific tail number to view detailed risk & predictions.")
-
-    # Bottom — quick model report toggle
-    with st.expander("Model diagnostics (quick view)"):
-        X = df[FEATURE_COLUMNS]
-        y_incident = (df["incident_probability"] > 0.5).astype(int)
-        X_train, X_test, y_inc_train, y_inc_test = train_test_split(X, y_incident, test_size=0.2, random_state=42)
-        y_pred = clf.predict(X_test)
-        rep = classification_report(y_inc_test, y_pred, output_dict=False, zero_division=0)
-        st.text(rep)
-
-# ---------------------------------------------------------------------
-# Run app
-# ---------------------------------------------------------------------
-if __name__ == "__main__":
-    app()
+    try:
+        proba_row = clf.predict_proba(X)[0]
+        if hasattr(clf, "classes_"):
+            if len(clf.classes_) == 2:
+                idx1 = int(np.where(clf.classes_ == 1)[0][0])
+                inc_proba = float(proba_row[idx1])
+            elif len(clf.classes_) == 1:
