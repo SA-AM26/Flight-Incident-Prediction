@@ -1,518 +1,334 @@
 # guardian_eye.py
 import os
-import json
-import pickle
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
 import streamlit as st
+import pydeck as pdk
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report, mean_squared_error
-import streamlit.components.v1 as components
 
-np.random.seed(42)
+# ==========
+# Utilities
+# ==========
+def _seed():
+    np.random.seed(42)
 
-# -----------------------------
-# 1) Synthetic Data Generator
-# -----------------------------
+def _risk_level(p):
+    if p > 0.7:
+        return "CRITICAL"
+    if p > 0.5:
+        return "HIGH"
+    if p > 0.3:
+        return "MEDIUM"
+    return "LOW"
+
+def _dominant_reason(w, t, a):
+    parts = []
+    if w >= 10: parts.append("Weather disruption")
+    if t >= 15: parts.append("Technical inspection")
+    if a >= 10: parts.append("ATC congestion")
+    return ", ".join(parts) if parts else "On-time operations"
+
+# ===========================
+# 1) Generate synthetic data
+# ===========================
 def generate_realistic_aviation_data(n_flights=3000):
-    airlines_data = {
-        'Air India': {
-            'code': 'AI',
-            'aircraft_types': ['Boeing 787-8', 'Boeing 777-300ER', 'Airbus A320neo', 'Boeing 737-800'],
-            'safety_score': 85
-        },
-        'IndiGo': {
-            'code': '6E',
-            'aircraft_types': ['Airbus A320neo', 'Airbus A321neo', 'ATR 72-600'],
-            'safety_score': 92
-        },
-        'SpiceJet': {
-            'code': 'SG',
-            'aircraft_types': ['Boeing 737-800', 'Boeing 737 MAX 8', 'Bombardier Q400'],
-            'safety_score': 78
-        },
-        'Vistara': {
-            'code': 'UK',
-            'aircraft_types': ['Airbus A320neo', 'Airbus A321neo', 'Boeing 787-9'],
-            'safety_score': 95
-        },
-        'GoFirst': {
-            'code': 'G8',
-            'aircraft_types': ['Airbus A320neo', 'Airbus A321neo'],
-            'safety_score': 82
-        },
-        'AirAsia India': {
-            'code': 'I5',
-            'aircraft_types': ['Airbus A320neo'],
-            'safety_score': 88
-        }
+    _seed()
+    airlines = ["Air India", "IndiGo", "SpiceJet", "Vistara", "GoFirst", "AirAsia India"]
+    aircraft_types = [
+        "A320", "A321", "A350", "ATR72", "B737", "B787"
+    ]
+    airports = {
+        "DEL": (28.5562, 77.1000),
+        "BOM": (19.0896, 72.8656),
+        "BLR": (13.1986, 77.7066),
+        "MAA": (12.9941, 80.1709),
+        "CCU": (22.6547, 88.4467),
+        "HYD": (17.2403, 78.4294),
+        "COK": (10.1520, 76.4019),
+        "AMD": (23.0726, 72.6263),
+        "PNQ": (18.5822, 73.9197),
+        "JAI": (26.8247, 75.8127),
+        "GOI": (15.3800, 73.8310),
+        "TRV": (8.4821, 76.9200),
+        "IXB": (26.6812, 88.3286),
+        "IXC": (30.6735, 76.7885),
+        "VNS": (25.4524, 82.8593),
+        "SXR": (33.9871, 74.7749),
     }
 
-    # Indian airports (+ extras you confirmed)
-    airports_data = {
-        'DEL': {'name': 'Delhi',     'lat': 28.5562, 'lng': 77.1000, 'traffic': 'Very High'},
-        'BOM': {'name': 'Mumbai',    'lat': 19.0896, 'lng': 72.8656, 'traffic': 'Very High'},
-        'BLR': {'name': 'Bangalore', 'lat': 13.1986, 'lng': 77.7066, 'traffic': 'High'},
-        'MAA': {'name': 'Chennai',   'lat': 12.9941, 'lng': 80.1709, 'traffic': 'High'},
-        'CCU': {'name': 'Kolkata',   'lat': 22.6547, 'lng': 88.4467, 'traffic': 'High'},
-        'HYD': {'name': 'Hyderabad', 'lat': 17.2403, 'lng': 78.4294, 'traffic': 'High'},
-        'COK': {'name': 'Kochi',     'lat': 10.1520, 'lng': 76.4019, 'traffic': 'Medium'},
-        'AMD': {'name': 'Ahmedabad', 'lat': 23.0726, 'lng': 72.6263, 'traffic': 'Medium'},
-        'PNQ': {'name': 'Pune',      'lat': 18.5822, 'lng': 73.9197, 'traffic': 'Medium'},
-        'JAI': {'name': 'Jaipur',    'lat': 26.8247, 'lng': 75.8127, 'traffic': 'Medium'},
-        'GOI': {'name': 'Goa',       'lat': 15.3800, 'lng': 73.8314, 'traffic': 'Medium'},
-        'TRV': {'name': 'Trivandrum','lat': 8.4821,  'lng': 76.9200, 'traffic': 'Medium'},
-        'IXB': {'name': 'Bagdogra',  'lat': 26.6812, 'lng': 88.3286, 'traffic': 'Low'},
-        'IXC': {'name': 'Chandigarh','lat': 30.6735, 'lng': 76.7885, 'traffic': 'Low'},
-        'VNS': {'name': 'Varanasi',  'lat': 25.4524, 'lng': 82.8593, 'traffic': 'Low'},
-        'SXR': {'name': 'Srinagar',  'lat': 33.9871, 'lng': 74.7740, 'traffic': 'Low'}
-    }
-
-    flights = []
+    rows = []
+    start_date = datetime(2024, 1, 1)
     for i in range(n_flights):
-        airline = np.random.choice(list(airlines_data.keys()))
-        ainfo = airlines_data[airline]
-        a_type = np.random.choice(ainfo['aircraft_types'])
-        tail = "VT-" + "".join(np.random.choice(list("ABCDEFGHIJKLMNOPQRSTUVWXYZ"), 3))
+        airline = np.random.choice(airlines)
+        aircraft = np.random.choice(aircraft_types)
+        origin, dest = np.random.choice(list(airports.keys()), 2, replace=False)
 
-        origin = np.random.choice(list(airports_data.keys()))
-        dest_choices = [k for k in airports_data.keys() if k != origin]
-        dest = np.random.choice(dest_choices)
+        # Schedule
+        sched = start_date + timedelta(days=np.random.randint(0, 365), hours=np.random.randint(5, 23),
+                                       minutes=np.random.choice([0, 15, 30, 45]))
 
-        base_date = datetime(2024, 1, 1) + timedelta(days=np.random.randint(0, 365))
-        sched_dep = base_date + timedelta(hours=np.random.randint(5, 24), minutes=int(np.random.choice([0, 15, 30, 45])))
+        # Factors (drivers)
+        # Weather a bit stronger in monsoon-ish months
+        month = sched.month
+        monsoon_boost = 1.4 if month in [6, 7, 8, 9] else 1.0
+        winter_fog = 1.25 if month in [12, 1, 2] and origin in ["DEL", "JAI", "IXB", "IXC"] else 1.0
 
-        # Tech / maintenance / crew / environment
-        age = np.random.uniform(1, 20)
-        fhours = np.random.uniform(5_000, 80_000)
-        cycles = fhours / 1.5
-        last_maint_days = np.random.uniform(1, 180)
+        weather_factor = np.random.poisson(8 * monsoon_boost * winter_fog)
+        technical_factor = np.random.poisson(10 if np.random.rand() < 0.25 else 3)
+        atc_factor = np.random.poisson(6 if origin in ["DEL", "BOM", "BLR", "MAA", "HYD"] else 3)
 
-        month = sched_dep.month
-        monsoon = 1.5 if month in [6, 7, 8, 9] else 1.0
-        fog = 1.3 if (month in [12, 1, 2] and origin in ['DEL', 'JAI']) else 1.0
-        weather_score = min(1.0, np.random.uniform(0.2, 1.0) * monsoon * fog)
+        # Delay components
+        delay_weather = np.random.poisson(weather_factor // 2)
+        delay_tech = np.random.poisson(technical_factor)
+        delay_atc = np.random.poisson(atc_factor // 2 + 1)
+        total_delay = delay_weather + delay_tech + delay_atc
 
-        engine_health = max(0, 100 - age * 2 - np.random.uniform(0, 20))
-        struct_int = max(0, 100 - age * 1.5 - cycles/1000 - np.random.uniform(0, 15))
-        avionics = max(0, 100 - age * 1 - np.random.uniform(0, 10))
-        maint_score = max(0, 100 - last_maint_days/2 - np.random.uniform(0, 20))
+        status = "DELAYED" if total_delay > 30 else ("IN-FLIGHT" if np.random.rand() > 0.5 else "ON-TIME")
 
-        pilot_exp_hours = np.random.uniform(500, 15000)
-        pilot_exp = min(100, pilot_exp_hours / 150)
-        crew_rest = np.random.uniform(8, 24)
-        crew_fatigue = max(0, min(100, crew_rest * 4))
+        # Risk proxy from factors (bounded 0..1)
+        risk_proxy = np.clip(0.55 * (technical_factor / 40) + 0.3 * (weather_factor / 40) + 0.25 * (atc_factor / 40), 0, 1)
+        # airline safety modifier
+        airline_safety = {
+            "Vistara": 0.9, "IndiGo": 0.92, "Air India": 0.85,
+            "AirAsia India": 0.88, "GoFirst": 0.82, "SpiceJet": 0.78
+        }[airline]
+        incident_probability = float(np.clip(risk_proxy * (1 - (airline_safety - 0.75)), 0, 1))
+        risk_level = _risk_level(incident_probability)
 
-        traffic_mult = {'Very High': 1.5, 'High': 1.2, 'Medium': 1.0, 'Low': 0.8}
-        atc_p = (traffic_mult[airports_data[origin]['traffic']] + traffic_mult[airports_data[dest]['traffic']]) / 2
-        atc_score = max(0, 100 - atc_p * 30 - np.random.uniform(0, 20))
-
-        # Risk components (lower health -> higher risk)
-        tech_risk = (100 - engine_health)*0.4 + (100 - struct_int)*0.3 + (100 - avionics)*0.2 + (100 - maint_score)*0.1
-        human_risk = (100 - pilot_exp)*0.7 + (100 - crew_fatigue)*0.3
-        env_risk = (weather_score*100)*0.7 + (100 - atc_score)*0.3
-
-        incident_p = (tech_risk*0.5 + human_risk*0.3 + env_risk*0.2) / 100
-        incident_p *= (100 - ainfo['safety_score']) / 100
-        incident_p = float(np.clip(incident_p, 0, 1))
-
-        if incident_p > 0.7:
-            risk_level = 'CRITICAL'
-        elif incident_p > 0.5:
-            risk_level = 'HIGH'
-        elif incident_p > 0.3:
-            risk_level = 'MEDIUM'
-        else:
-            risk_level = 'LOW'
-
-        # Delay components & total
-        base_delay = np.random.poisson(8)
-        weather_delay = np.random.poisson(30) if weather_score > 0.7 else (np.random.poisson(15) if weather_score > 0.5 else 0)
-        tech_delay = np.random.poisson(45) if (engine_health < 70 or maint_score < 60) else (np.random.poisson(20) if engine_health < 85 else 0)
-        atc_delay = np.random.poisson(25) if atc_score < 70 else (np.random.poisson(10) if atc_score < 85 else 0)
-        total_delay = int(base_delay + weather_delay + tech_delay + atc_delay)
-
-        # Status
-        if total_delay > 60:
-            status = 'DELAYED'
-        elif np.random.random() > 0.7:
-            status = 'IN-FLIGHT'
-        elif np.random.random() > 0.5:
-            status = 'COMPLETED'
-        else:
-            status = 'SCHEDULED'
-
-        actual_dep = sched_dep + timedelta(minutes=total_delay)
-
-        # Reasons (top contributor)
-        delay_parts = {
-            'Weather': weather_delay,
-            'Technical': tech_delay,
-            'ATC/Congestion': atc_delay,
-            'Base Ops': base_delay
-        }
-        delay_reason = max(delay_parts, key=delay_parts.get)
-        if total_delay == 0:
-            delay_reason = 'On-time'
-
-        risk_parts = {
-            'Technical condition': tech_risk,
-            'Human factors (crew)': human_risk,
-            'Environment (weather/ATC)': env_risk
-        }
-        risk_reason = max(risk_parts, key=risk_parts.get)
-
-        # Random geo positions near origin→dest arc (approx)
-        o = airports_data[origin]; d = airports_data[dest]
-        t = np.random.rand()
-        lat = o['lat'] + (d['lat'] - o['lat']) * t + np.random.uniform(-0.5, 0.5)
-        lng = o['lng'] + (d['lng'] - o['lng']) * t + np.random.uniform(-0.5, 0.5)
-
-        flights.append({
-            'flight_id': f"{ainfo['code']}{1000+i}",
-            'airline': airline,
-            'aircraft_type': a_type,
-            'tail_number': tail,
-            'origin': origin,
-            'destination': dest,
-            'scheduled_departure': sched_dep,
-            'actual_departure': actual_dep,
-            'delay_minutes': total_delay,
-            'status': status,
-            'aircraft_age_years': age,
-            'flight_hours': fhours,
-            'cycles': cycles,
-            'last_maintenance_days': last_maint_days,
-            'engine_health': engine_health,
-            'structural_integrity': struct_int,
-            'avionics_status': avionics,
-            'maintenance_score': maint_score,
-            'pilot_experience': pilot_exp,
-            'crew_fatigue_factor': crew_fatigue,
-            'weather_score': weather_score,
-            'atc_score': atc_score,
-            'technical_risk': tech_risk,
-            'human_risk': human_risk,
-            'environmental_risk': env_risk,
-            'incident_probability': incident_p,
-            'risk_level': risk_level,
-            'weather_delay': weather_delay,
-            'technical_delay': tech_delay,
-            'atc_delay': atc_delay,
-            'base_delay': base_delay,
-            'delay_reason': delay_reason,
-            'risk_reason': risk_reason,
-            'lat': float(lat),
-            'lng': float(lng)
+        rows.append({
+            "flight_id": f"{airline[:2].upper()}{1000 + i}",
+            "airline": airline,
+            "aircraft_type": aircraft,
+            "tail_number": f"VT-{chr(65 + (i % 26))}{chr(65 + ((i+1) % 26))}{chr(65 + ((i+2) % 26))}",
+            "origin": origin, "destination": dest,
+            "scheduled_departure": sched,
+            "actual_departure": sched + timedelta(minutes=int(total_delay)),
+            "status": status,
+            "delay_minutes": int(total_delay),
+            "delay_reason": _dominant_reason(delay_weather, delay_tech, delay_atc),
+            "incident_probability": incident_probability,
+            "risk_level": risk_level,
+            # raw drivers
+            "weather_factor": int(weather_factor),
+            "technical_factor": int(technical_factor),
+            "atc_factor": int(atc_factor),
+            # coordinates (spawn around origin)
+            "lat": float(airports[origin][0] + np.random.uniform(-1.0, 1.0)),
+            "lng": float(airports[origin][1] + np.random.uniform(-1.0, 1.0)),
+            # some extra aircraft “health” flavor
+            "engine_health": float(np.clip(100 - technical_factor * 2 + np.random.randn() * 6, 0, 100)),
+            "structural_integrity": float(np.clip(100 - (technical_factor * 1.2) + np.random.randn() * 6, 0, 100)),
+            "avionics_status": float(np.clip(100 - (technical_factor * 0.8) + np.random.randn() * 6, 0, 100)),
+            "maintenance_score": float(np.clip(100 - (technical_factor * 1.5) + np.random.randn() * 6, 0, 100)),
+            "flight_hours": int(np.random.uniform(2_000, 60_000)),
+            "last_maintenance_days": int(np.random.uniform(1, 180)),
         })
 
-    return pd.DataFrame(flights)
+    df = pd.DataFrame(rows)
+    return df
 
-# -----------------------------------
-# 2) Minimal training (optional save)
-# -----------------------------------
-def train_and_cache_models(df):
-    features = [
-        'aircraft_age_years','flight_hours','cycles','last_maintenance_days',
-        'engine_health','structural_integrity','avionics_status','maintenance_score',
-        'pilot_experience','crew_fatigue_factor','weather_score','atc_score'
-    ]
-    X = df[features]
-    y_inc = (df['incident_probability'] > 0.5).astype(int)
-    y_delay = df['delay_minutes']
+# ==========================
+# 2) Train simple ML models
+# ==========================
+def train_models(df: pd.DataFrame):
+    X = df[["weather_factor", "technical_factor", "atc_factor"]]
+    y_incident = (df["risk_level"].isin(["HIGH", "CRITICAL"])).astype(int)
+    y_delay = df["delay_minutes"]
 
-    Xtr, Xte, ytr, yte = train_test_split(X, y_inc, test_size=0.2, random_state=42)
+    X_train, X_test, y_train_inc, y_test_inc = train_test_split(X, y_incident, test_size=0.2, random_state=42)
+
     clf = RandomForestClassifier(n_estimators=120, random_state=42)
-    clf.fit(Xtr, ytr)
-    _ = clf.predict(Xte)  # not printed to keep UI clean
+    clf.fit(X_train, y_train_inc)
 
-    _, _, ydtr, ydt = train_test_split(X, y_delay, test_size=0.2, random_state=42)
     reg = RandomForestRegressor(n_estimators=120, random_state=42)
-    reg.fit(Xtr, ydtr)
-    _ = reg.predict(Xte)
+    reg.fit(X_train, y_delay.loc[X_train.index])
 
-    os.makedirs("artifacts", exist_ok=True)
-    with open("artifacts/incident_classifier.pkl", "wb") as f:
-        pickle.dump(clf, f)
-    with open("artifacts/delay_predictor.pkl", "wb") as f:
-        pickle.dump(reg, f)
-    with open("artifacts/feature_columns.pkl", "wb") as f:
-        pickle.dump(features, f)
+    return clf, reg
 
-# -----------------------------
-# 3) Streamlit App
-# -----------------------------
+def explain_delay_reason(row):
+    parts = []
+    if row["weather_factor"] >= 10: parts.append("Heavy weather impact")
+    if row["technical_factor"] >= 12: parts.append("Possible technical/MX hold")
+    if row["atc_factor"] >= 8: parts.append("ATC congestion/slot issues")
+    return parts if parts else ["No major delay drivers detected"]
+
+def contributions(clf, reg, row):
+    # simple normalized “contributions” using feature importances × scaled value
+    feats = ["weather_factor", "technical_factor", "atc_factor"]
+    vals = np.array([row[f] for f in feats], dtype=float)
+
+    # scale to [0..1] with a soft cap for readability
+    scaled = np.clip(vals / (vals.max() + 1e-9), 0, 1)
+
+    clf_imp = getattr(clf, "feature_importances_", np.array([1/3, 1/3, 1/3]))
+    reg_imp = getattr(reg, "feature_importances_", np.array([1/3, 1/3, 1/3]))
+
+    inc_contrib = (scaled * clf_imp) / (np.sum(scaled * clf_imp) + 1e-9)
+    delay_contrib = (scaled * reg_imp) / (np.sum(scaled * reg_imp) + 1e-9)
+
+    return dict(zip(feats, inc_contrib)), dict(zip(feats, delay_contrib))
+
+# =====================
+# 3) Streamlit UI
+# =====================
 st.set_page_config(page_title="🛡️ Guardian Eye", layout="wide")
-st.markdown(
-    "<h1 style='text-align:center'>🛡️ GUARDIAN EYE – Aviation Operations Center</h1>",
-    unsafe_allow_html=True
-)
+st.title("🛡️ Guardian Eye – Real-time Aviation Risk & Delay Intelligence")
 
-# Load or create data
-if not os.path.exists("aviation_dataset.csv"):
-    with st.spinner("Generating realistic aviation dataset..."):
-        df = generate_realistic_aviation_data(3000)
-        df.to_csv("aviation_dataset.csv", index=False)
-        train_and_cache_models(df)
+st.sidebar.header("⚙️ Controls")
+regen = st.sidebar.button("🔄 Regenerate Dataset")
+
+DATA_FILE = "aviation_dataset.csv"
+if regen or not os.path.exists(DATA_FILE):
+    st.sidebar.info("Generating dataset…")
+    df_all = generate_realistic_aviation_data(3000)
+    df_all.to_csv(DATA_FILE, index=False)
 else:
-    df = pd.read_csv("aviation_dataset.csv", parse_dates=['scheduled_departure','actual_departure'])
+    df_all = pd.read_csv(DATA_FILE, parse_dates=["scheduled_departure", "actual_departure"])
 
-# --- Sidebar filters
-st.sidebar.header("🎛️ Filters")
-airlines = ["All Airlines"] + sorted(df['airline'].unique().tolist())
-sel_airline = st.sidebar.selectbox("Airline", airlines)
+# Train models (kept in memory so selects are instant)
+clf, reg = train_models(df_all)
 
-df_f = df.copy()
-if sel_airline != "All Airlines":
-    df_f = df_f[df_f['airline'] == sel_airline]
+# Filters
+airlines = ["All Airlines"] + sorted(df_all["airline"].unique())
+airline_sel = st.sidebar.selectbox("Airline", airlines, index=0)
 
-types = ["All Types"] + sorted(df_f['aircraft_type'].unique().tolist())
-sel_type = st.sidebar.selectbox("Aircraft Type", types)
-if sel_type != "All Types":
-    df_f = df_f[df_f['aircraft_type'] == sel_type]
+df = df_all.copy()
+if airline_sel != "All Airlines":
+    df = df[df["airline"] == airline_sel]
 
-tails = ["All Aircraft"] + sorted(df_f['tail_number'].unique().tolist())
-sel_tail = st.sidebar.selectbox("Tail Number", tails)
-if sel_tail != "All Aircraft":
-    df_f = df_f[df_f['tail_number'] == sel_tail]
+types = ["All Types"] + sorted(df["aircraft_type"].unique())
+type_sel = st.sidebar.selectbox("Aircraft Type", types, index=0)
+if type_sel != "All Types":
+    df = df[df["aircraft_type"] == type_sel]
 
-# --- Top metrics
+tails = ["All Aircraft"] + sorted(df["tail_number"].unique())
+tail_sel = st.sidebar.selectbox("Tail Number", tails, index=0)
+if tail_sel != "All Aircraft":
+    df = df[df["tail_number"] == tail_sel]
+
+# KPIs
 c1, c2, c3, c4 = st.columns(4)
-with c1:
-    st.metric("Total Flights (filtered)", len(df_f))
-with c2:
-    st.metric("In Flight", int((df_f['status'] == 'IN-FLIGHT').sum()))
-with c3:
-    st.metric("Delayed > 60 min", int((df_f['delay_minutes'] > 60).sum()))
-with c4:
-    st.metric("Avg Incident Probability", f"{df_f['incident_probability'].mean()*100:.1f}%")
+c1.metric("Total Flights", len(df))
+c2.metric("Delayed Flights", int((df["status"] == "DELAYED").sum()))
+c3.metric("Critical Risk", int((df["risk_level"] == "CRITICAL").sum()))
+c4.metric("Avg Delay (min)", round(float(df["delay_minutes"].mean() if len(df) else 0), 1))
 
-st.markdown("---")
+st.divider()
 
-# -----------------------------
-# 3D Globe (Three.js via HTML)
-# -----------------------------
-st.subheader("🌍 Global Aircraft Tracking (3D)")
+# ========= 3D Globe =========
+st.subheader("🌍 Global Aircraft Tracking (3D-style)")
+if len(df):
+    # map colored by risk probability
+    view_state = pdk.ViewState(latitude=22, longitude=79, zoom=4.3, pitch=40, bearing=0)
+    scatter = pdk.Layer(
+        "ScatterplotLayer",
+        data=df,
+        get_position=["lng", "lat"],
+        get_radius=45000,
+        get_fill_color=[
+            "incident_probability * 255",
+            "(1 - incident_probability) * 180",
+            "80",
+            "200"
+        ],
+        pickable=True,
+        stroked=True,
+        filled=True,
+        line_width_min_pixels=1,
+    )
+    tooltip = {
+        "html": "<b>{flight_id}</b><br/>Airline: {airline}<br/>Type: {aircraft_type}<br/>Risk: {risk_level}<br/>Delay: {delay_minutes} min<br/>Reason: {delay_reason}",
+        "style": {"backgroundColor": "rgba(30,41,59,0.9)", "color": "white", "fontSize": "12px"}
+    }
+    deck = pdk.Deck(map_style="mapbox://styles/mapbox/dark-v11", initial_view_state=view_state,
+                    layers=[scatter], tooltip=tooltip)
+    st.pydeck_chart(deck, use_container_width=True)
+else:
+    st.info("No flights match your filters.")
 
-# Prepare JSON for globe markers (filtered subset to keep JS light)
-df_draw = df_f.copy()
-if len(df_draw) > 400:
-    # sample for performance
-    df_draw = df_draw.sample(400, random_state=42)
+st.divider()
 
-def risk_color(level):
-    return {
-        "CRITICAL": "#FF2D2E",
-        "HIGH": "#FF9F1C",
-        "MEDIUM": "#2EA8FF",
-        "LOW": "#10B981"
-    }.get(level, "#10B981")
+# ========= Flight table with ML predictions =========
+st.subheader("📋 Flight Monitor + ML Predictions")
+view_df = df.copy()
+if len(view_df) > 300:
+    view_df = view_df.sample(300, random_state=42)
 
-markers = []
-for _, r in df_draw.iterrows():
-    markers.append({
-        "id": str(r["flight_id"]),
-        "tail": r["tail_number"],
-        "airline": r["airline"],
-        "type": r["aircraft_type"],
-        "lat": float(r["lat"]),
-        "lng": float(r["lng"]),
-        "riskLevel": r["risk_level"],
-        "riskColor": risk_color(r["risk_level"]),
-        "status": r["status"],
-        "delay": int(r["delay_minutes"]),
-        "delayReason": r["delay_reason"],
-        "riskReason": r["risk_reason"],
-        "origin": r["origin"],
-        "dest": r["destination"]
-    })
+X = view_df[["weather_factor", "technical_factor", "atc_factor"]]
+view_df["pred_incident_flag"] = clf.predict(X)
+view_df["pred_incident_prob"] = clf.predict_proba(X)[:, 1]
+view_df["pred_incident"] = np.where(view_df["pred_incident_flag"] == 1, "HIGH RISK", "LOW RISK")
+view_df["pred_delay"] = reg.predict(X).round(1)
 
-globe_html = f"""
-<div id="wrap" style="width:100%;height:520px;position:relative;border-radius:12px;overflow:hidden;background:radial-gradient(1200px 600px at 50% 50%, #0b1220 0%, #050a14 60%, #02060d 100%);">
-  <div id="tooltip" style="position:absolute; top:12px; right:12px; max-width:360px; background:rgba(0,0,0,0.7); color:#fff; font-family:system-ui,-apple-system,Segoe UI,Roboto; font-size:13px; line-height:1.4; padding:12px 14px; border-radius:10px; border:1px solid rgba(255,255,255,0.15); display:none; white-space:normal;"></div>
-  <canvas id="c"></canvas>
-</div>
+# simple reason highlight
+reasons = []
+for _, r in view_df.iterrows():
+    reasons.append(_dominant_reason(r["weather_factor"], r["technical_factor"], r["atc_factor"]))
+view_df["predicted_reason"] = reasons
 
-<script src="https://unpkg.com/three@0.157.0/build/three.min.js"></script>
-<script src="https://unpkg.com/three@0.157.0/examples/js/controls/OrbitControls.js"></script>
-<script>
-const FLIGHTS = {json.dumps(markers)};
-
-const canvas = document.getElementById('c');
-const wrap = document.getElementById('wrap');
-const tooltip = document.getElementById('tooltip');
-
-// Renderer
-const renderer = new THREE.WebGLRenderer({canvas, antialias:true, alpha:true});
-renderer.setPixelRatio(window.devicePixelRatio);
-renderer.setSize(wrap.clientWidth, wrap.clientHeight);
-
-// Scene & camera
-const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(45, wrap.clientWidth / wrap.clientHeight, 0.1, 1000);
-camera.position.set(0, 0, 5.5);
-
-// Controls
-const controls = new THREE.OrbitControls(camera, renderer.domElement);
-controls.enableDamping = true;
-controls.dampingFactor = 0.05;
-controls.rotateSpeed = 0.5;
-controls.minDistance = 4.2;
-controls.maxDistance = 9;
-
-// Lights
-const ambient = new THREE.AmbientLight(0x88aaff, 0.6);
-scene.add(ambient);
-const dir = new THREE.DirectionalLight(0xffffff, 0.6);
-dir.position.set(5,5,5);
-scene.add(dir);
-
-// Earth (textured + glow)
-const loader = new THREE.TextureLoader();
-const earthTex = loader.load("https://unpkg.com/three-globe/example/img/earth-dark.jpg");
-const earthGeo = new THREE.SphereGeometry(2, 64, 64);
-const earthMat = new THREE.MeshPhongMaterial({map: earthTex, shininess: 5});
-const earth = new THREE.Mesh(earthGeo, earthMat);
-scene.add(earth);
-
-// Atmosphere glow
-const glowGeo = new THREE.SphereGeometry(2.06, 64, 64);
-const glowMat = new THREE.MeshBasicMaterial({color: 0x2e5cff, transparent:true, opacity:0.12, blending: THREE.AdditiveBlending});
-const glow = new THREE.Mesh(glowGeo, glowMat);
-scene.add(glow);
-
-// Helpers
-function latLngToXYZ(lat, lng, radius=2.02) {{
-  const phi = (90 - lat) * (Math.PI/180);
-  const theta = (lng + 180) * (Math.PI/180);
-  const x = -radius * Math.sin(phi) * Math.cos(theta);
-  const z = radius * Math.sin(phi) * Math.sin(theta);
-  const y = radius * Math.cos(phi);
-  return new THREE.Vector3(x, y, z);
-}}
-
-// Markers
-const markerGroup = new THREE.Group();
-scene.add(markerGroup);
-
-const colorHex = (c) => new THREE.Color(c);
-
-FLIGHTS.forEach(f => {{
-  const pos = latLngToXYZ(f.lat, f.lng, 2.02);
-  const g = new THREE.SphereGeometry(0.035, 12, 12);
-  const m = new THREE.MeshBasicMaterial({{color: colorHex(f.riskColor)}});
-  const dot = new THREE.Mesh(g, m);
-  dot.position.copy(pos);
-
-  // a faint line to surface normal (subtle)
-  const lineMat = new THREE.LineBasicMaterial({{color: 0x1f4fff, transparent:true, opacity:0.18}});
-  const lineGeo = new THREE.BufferGeometry().setFromPoints([pos.clone().multiplyScalar(0.98), pos]);
-  const line = new THREE.Line(lineGeo, lineMat);
-
-  const group = new THREE.Group();
-  group.add(dot);
-  group.add(line);
-  group.userData = f; // stash flight info
-  markerGroup.add(group);
-}});
-
-// Raycaster for clicks
-const raycaster = new THREE.Raycaster();
-const mouse = new THREE.Vector2();
-
-function onClick(e) {{
-  const rect = renderer.domElement.getBoundingClientRect();
-  mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-  mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-
-  raycaster.setFromCamera(mouse, camera);
-  const intersects = raycaster.intersectObjects(markerGroup.children.map(g => g.children[0])); // sphere child
-
-  if (intersects.length > 0) {{
-    const obj = intersects[0].object.parent; // group
-    const f = obj.userData;
-    tooltip.style.display = 'block';
-    tooltip.innerHTML = `
-      <div style="font-weight:700; margin-bottom:6px; font-size:14px;">
-        ${'{'}f.tail{'}'} <span style="opacity:0.7;font-weight:500">(${ '{'}f.airline{'}'} • ${'{'}f.type{'}'})</span>
-      </div>
-      <div><b>Status:</b> ${'{'}f.status{'}'}</div>
-      <div><b>Route:</b> ${'{'}f.origin{'}'} → ${'{'}f.dest{'}'}</div>
-      <div><b>Delay (min):</b> ${'{'}f.delay{'}'} ${'{'}f.delay > 0 ? ' – ' + f.delayReason : ''{'}'}</div>
-      <div><b>Risk:</b> <span style="color:${'{'}f.riskColor{'}'};font-weight:700">${'{'}f.riskLevel{'}'}</span> – ${'{'}f.riskReason{'}'}</div>
-    `;
-  }}
-}}
-
-function onMouseMove(e) {{
-  if (tooltip.style.display !== 'none') {{
-    const rect = wrap.getBoundingClientRect();
-    tooltip.style.left = (e.clientX - rect.left - 10) + 'px';
-    tooltip.style.top = (e.clientY - rect.top - 10) + 'px';
-  }}
-}}
-
-function onLeave() {{
-  // keep tooltip until next click; comment line below if you want auto-hide on leave
-  // tooltip.style.display = 'none';
-}}
-
-renderer.domElement.addEventListener('click', onClick);
-renderer.domElement.addEventListener('mousemove', onMouseMove);
-renderer.domElement.addEventListener('mouseleave', onLeave);
-
-// Resize
-function onResize() {{
-  const w = wrap.clientWidth;
-  const h = wrap.clientHeight;
-  renderer.setSize(w, h);
-  camera.aspect = w / h;
-  camera.updateProjectionMatrix();
-}}
-window.addEventListener('resize', onResize);
-
-// Animate
-function animate() {{
-  requestAnimationFrame(animate);
-  earth.rotation.y += 0.0009;    // gentle auto-rotate
-  glow.rotation.y += 0.0009;
-  controls.update();
-  renderer.render(scene, camera);
-}}
-animate();
-</script>
-"""
-
-components.html(globe_html, height=540, scrolling=False)
-
-st.caption(
-    "Click any marker to see details. Markers are colored by risk: "
-    "🔴 Critical, 🟠 High, 🔵 Medium, 🟢 Low."
+st.dataframe(
+    view_df[[
+        "flight_id", "airline", "aircraft_type", "tail_number",
+        "status", "risk_level", "incident_probability",
+        "pred_incident", "pred_incident_prob", "delay_minutes", "pred_delay", "predicted_reason"
+    ]].sort_values("pred_incident_prob", ascending=False),
+    use_container_width=True
 )
 
-st.markdown("---")
+st.divider()
 
-# -----------------------------
-# 4) Fleet table (filtered)
-# -----------------------------
-st.subheader("✈️ Active Aircraft (Filtered)")
-show_cols = [
-    'flight_id','tail_number','airline','aircraft_type','origin','destination',
-    'status','delay_minutes','delay_reason','risk_level','risk_reason',
-    'incident_probability'
-]
-df_show = df_f[show_cols].copy()
-df_show['incident_probability'] = (df_show['incident_probability']*100).round(1).astype(str) + '%'
-st.dataframe(df_show.head(200), use_container_width=True)
+# ========= “Click flight” style: select one flight for deep dive =========
+st.subheader("🛠️ Selected Flight – Detailed Risk & Delay Explanation")
+# (Streamlit can't capture pydeck on-map clicks directly, so we provide a selector synced with the table)
+flight_ids = ["-- Select a flight --"] + list(view_df["flight_id"])
+pick = st.selectbox("Choose a flight (mirrors the globe markers & table above):", flight_ids, index=0)
 
-# -----------------------------
-# 5) Helpful notes
-# -----------------------------
-with st.expander("ℹ️ What counts as the reason for delay & risk?"):
-    st.write("""
-- **Delay reason** = largest contributor among `Weather`, `Technical`, `ATC/Congestion`, `Base Ops`.
-- **Risk reason** = largest component among `Technical condition`, `Human factors (crew)`, `Environment (weather/ATC)`.
-- The globe uses a **dark earth texture + glow** for a clear, modern ops-center look.
-""")
+if pick != "-- Select a flight --":
+    sel = view_df[view_df["flight_id"] == pick].iloc[0]
+    st.markdown(f"### ✈️ {sel['flight_id']} • {sel['airline']} • {sel['aircraft_type']} • Tail {sel['tail_number']}")
+
+    # Compute contributions
+    inc_contrib, delay_contrib = contributions(clf, reg, sel)
+
+    left, right = st.columns(2)
+
+    with left:
+        st.markdown("#### 🔮 Incident Prediction")
+        st.metric("Predicted Incident Risk", f"{'HIGH' if sel['pred_incident_flag']==1 else 'LOW'}",
+                  delta=f"{sel['pred_incident_prob']*100:.1f}% probability")
+        st.write("**Drivers (relative contribution):**")
+        st.progress(float(inc_contrib["weather_factor"]))
+        st.caption(f"Weather factor: {inc_contrib['weather_factor']*100:.1f}%")
+        st.progress(float(inc_contrib["technical_factor"]))
+        st.caption(f"Technical factor: {inc_contrib['technical_factor']*100:.1f}%")
+        st.progress(float(inc_contrib["atc_factor"]))
+        st.caption(f"ATC factor: {inc_contrib['atc_factor']*100:.1f}%")
+
+        st.write("**Reasoning:**")
+        for line in explain_delay_reason(sel):
+            st.write(f"- {line}")
+
+    with right:
+        st.markdown("#### ⏱️ Delay Prediction")
+        st.metric("Predicted Delay (min)", f"{sel['pred_delay']:.1f}",
+                  delta=f"Actual: {sel['delay_minutes']} min")
+        st.write("**Drivers (relative contribution):**")
+        st.progress(float(delay_contrib["weather_factor"]))
+        st.caption(f"Weather factor: {delay_contrib['weather_factor']*100:.1f}%")
+        st.progress(float(delay_contrib["technical_factor"]))
+        st.caption(f"Technical factor: {delay_contrib['technical_factor']*100:.1f}%")
+        st.progress(float(delay_contrib["atc_factor"]))
+        st.caption(f"ATC factor: {delay_contrib['atc_factor']*100:.1f}%")
+
+        st.write("**Operational Context**")
+        st.write(f"- Status: **{sel['status']}**")
+        st.write(f"- Risk Level: **{sel['risk_level']}** (p={sel['incident_probability']:.2f})")
+        st.write(f"- Original Delay Reason: **{sel['delay_reason']}**")
+        st.write(f"- Engine Health: **{sel['engine_health']:.1f}%**, Avionics: **{sel['avionics_status']:.1f}%**")
+        st.write(f"- Maintenance Score: **{sel['maintenance_score']:.1f}%**, Last MX: **{sel['last_maintenance_days']} days** ago")
+
+st.caption("Tip: Use the Airline / Type / Tail filters to scope the globe & table. The selector above opens a deep-dive panel for that flight.")
+
+
