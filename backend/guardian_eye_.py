@@ -516,3 +516,4 @@ with st.expander("ℹ️ What counts as the reason for delay & risk?"):
 - **Risk reason** = largest component among `Technical condition`, `Human factors (crew)`, `Environment (weather/ATC)`.
 - The globe uses a **dark earth texture + glow** for a clear, modern ops-center look.
 """)
+
