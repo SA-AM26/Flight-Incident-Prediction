@@ -2,205 +2,193 @@ import os
 import pandas as pd
 import numpy as np
 import streamlit as st
-from datetime import datetime
-import pydeck as pdk
+from datetime import datetime, timedelta
 from streamlit_autorefresh import st_autorefresh
+import plotly.graph_objects as go
 
-# -----------------------------
-# CONFIG
-# -----------------------------
-st.set_page_config(page_title="Guardian Eye - Aviation Dashboard",
-                   page_icon="🛡️",
-                   layout="wide")
+st.set_page_config(page_title="Guardian Eye - Aviation Dashboard", layout="wide")
 
-# -----------------------------
-# AUTO REFRESH CLOCK
-# -----------------------------
-st_autorefresh(interval=1000, key="clock_refresh")
+# 🔄 Auto-refresh every 30 seconds (refreshes KPIs & globe)
+st_autorefresh(interval=30 * 1000, key="data_refresh")
 
-# -----------------------------
-# HEADER
-# -----------------------------
-col1, col2 = st.columns([3,1])
-with col1:
-    st.markdown("<h1 style='color:#4FC3F7;'>🛡️ Guardian Eye - Aviation Dashboard</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='color:grey;'>Real-time flight safety & delay monitoring</p>", unsafe_allow_html=True)
+# --- Utility: Generate sample aviation data ---
+def generate_sample_data(n=200):
+    airlines = ["Air India", "IndiGo", "SpiceJet", "Vistara", "GoFirst", "AirAsia India"]
+    aircraft_types = ["Boeing 737-800", "Boeing 737 MAX 8", "Airbus A320neo",
+                      "Airbus A321", "ATR 72-600", "Bombardier Q400", "Boeing 787-8", "Airbus A350-900"]
+    airports = {
+        "DEL": (28.5562, 77.1000), "BOM": (19.0896, 72.8656),
+        "BLR": (13.1986, 77.7066), "MAA": (12.9941, 80.1709),
+        "CCU": (22.6547, 88.4467), "HYD": (17.2403, 78.4294),
+        "COK": (10.1520, 76.4019), "AMD": (23.0726, 72.6263),
+        "PNQ": (18.5822, 73.9197), "JAI": (26.8247, 75.8127)
+    }
 
-with col2:
-    now = datetime.now()
-    st.markdown("### ⏱️ Live Clock")
-    st.markdown(f"<div style='font-size:22px; color:#00FFAA;'>{now.strftime('%H:%M:%S')}</div>", unsafe_allow_html=True)
-    st.markdown(f"<div style='font-size:14px; color:grey;'>{now.strftime('%d %B %Y')}</div>", unsafe_allow_html=True)
+    records = []
+    base_time = datetime.now().replace(minute=0, second=0, microsecond=0)
 
-# -----------------------------
-# LOAD DATASET
-# -----------------------------
+    for i in range(n):
+        airline = np.random.choice(airlines)
+        aircraft_type = np.random.choice(aircraft_types)
+        origin, dest = np.random.choice(list(airports.keys()), 2, replace=False)
+        tail_number = f"VT-{''.join(np.random.choice(list('ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 3))}"
+
+        dep_time = base_time + timedelta(minutes=np.random.randint(0, 60*24))
+        delay = max(0, int(np.random.normal(30, 20)))
+        arr_time = dep_time + timedelta(hours=2, minutes=delay)
+
+        incident_prob = np.random.rand()
+        if incident_prob > 0.7:
+            risk_level = "CRITICAL"
+            reason = "Engine fault history"
+        elif incident_prob > 0.5:
+            risk_level = "HIGH"
+            reason = "Poor weather + maintenance overdue"
+        elif incident_prob > 0.3:
+            risk_level = "MEDIUM"
+            reason = "ATC congestion"
+        else:
+            risk_level = "LOW"
+            reason = "Normal operations"
+
+        records.append({
+            "Flight ID": f"FL{i+1:04d}",
+            "Airline": airline,
+            "Aircraft Type": aircraft_type,
+            "Tail Number": tail_number,
+            "Origin": origin,
+            "Destination": dest,
+            "Scheduled Departure": dep_time,
+            "Actual Arrival": arr_time,
+            "Delay Minutes": delay,
+            "Incident Probability": incident_prob,
+            "Risk Level": risk_level,
+            "Reason": reason,
+            "Latitude": airports[origin][0] + np.random.uniform(-1, 1),
+            "Longitude": airports[origin][1] + np.random.uniform(-1, 1),
+            "Origin Lat": airports[origin][0],
+            "Origin Lng": airports[origin][1],
+            "Dest Lat": airports[dest][0],
+            "Dest Lng": airports[dest][1]
+        })
+
+    return pd.DataFrame(records)
+
+# --- Load or generate data ---
 if not os.path.exists("aviation_dataset.csv"):
-    st.error("❌ Dataset not found! Please generate 'aviation_dataset.csv' first.")
-    st.stop()
+    df = generate_sample_data(8000)
+    df.to_csv("aviation_dataset.csv", index=False)
+else:
+    df = pd.read_csv("aviation_dataset.csv", parse_dates=["Scheduled Departure", "Actual Arrival"])
 
-df = pd.read_csv("aviation_dataset.csv")
+# --- Sidebar Filters ---
+st.sidebar.header("✈️ Flight Selection")
+airline_choice = st.sidebar.selectbox("Airline", ["All"] + sorted(df["Airline"].unique()))
+aircraft_choice = st.sidebar.selectbox("Aircraft Type", ["All"] + sorted(df["Aircraft Type"].unique()))
+origin_choice = st.sidebar.selectbox("Origin", ["All"] + sorted(df["Origin"].unique()))
+dest_choice = st.sidebar.selectbox("Destination", ["All"] + sorted(df["Destination"].unique()))
 
-# Ensure datetime parsing
-if "scheduled_departure" in df.columns:
-    df["scheduled_departure"] = pd.to_datetime(df["scheduled_departure"], errors="coerce")
-if "actual_departure" in df.columns:
-    df["actual_departure"] = pd.to_datetime(df["actual_departure"], errors="coerce")
+filtered = df.copy()
+if airline_choice != "All":
+    filtered = filtered[filtered["Airline"] == airline_choice]
+if aircraft_choice != "All":
+    filtered = filtered[filtered["Aircraft Type"] == aircraft_choice]
+if origin_choice != "All":
+    filtered = filtered[filtered["Origin"] == origin_choice]
+if dest_choice != "All":
+    filtered = filtered[filtered["Destination"] == dest_choice]
 
-# -----------------------------
-# INCIDENT HISTORY (SIMULATED)
-# -----------------------------
-incident_reasons = {
-    "CRITICAL": [
-        "⚠️ Engine vibration exceeded safe threshold",
-        "⚠️ Hydraulic failure during pre-flight check",
-        "⚠️ Severe weather forecasted on route",
-        "⚠️ Landing gear malfunction reported"
-    ],
-    "HIGH": [
-        "⚠️ Delayed A-check maintenance overdue",
-        "⚠️ Pilot fatigue flagged (>14hrs duty)",
-        "⚠️ Avionics warning during taxiing",
-        "⚠️ ATC congestion at destination airport"
-    ],
-    "MEDIUM": [
-        "⚠️ Minor technical snag reported",
-        "⚠️ Weather instability expected en route",
-        "⚠️ Crew rest below recommended hours"
-    ]
-}
+# --- Live Clock ---
+st_autorefresh(interval=1000, key="clock_refresh")
+current_time = datetime.now()
+clock_col = st.sidebar.container()
+clock_col.subheader("⏱️ Live Clock")
+clock_col.write(f"**{current_time.strftime('%H:%M:%S')}**")
+clock_col.write(current_time.strftime("%d %B %Y"))
 
-action_plan = {
-    "CRITICAL": "🚨 Flight must be GROUNDED. Emergency maintenance required before next departure.",
-    "HIGH": "🟠 Extra inspection recommended before departure. Delay likely until cleared.",
-    "MEDIUM": "🔵 Monitor closely. Possible short delay if condition persists.",
-    "LOW": "🟢 Normal operations."
-}
+# --- Dashboard Header ---
+st.markdown("<h1 style='color:#3B82F6;'>🛡️ Guardian Eye - Aviation Dashboard</h1>", unsafe_allow_html=True)
+st.write("Real-time flight safety & delay monitoring")
 
-# -----------------------------
-# SIDEBAR FILTERS
-# -----------------------------
-st.sidebar.header("🎛️ Flight Filters")
+# --- KPIs ---
+kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
+kpi1.metric("Total Flights", len(filtered))
+kpi2.metric("In-Flight", len(filtered[filtered["Delay Minutes"] < 15]))
+kpi3.metric("Delayed", len(filtered[filtered["Delay Minutes"] > 15]))
+kpi4.metric("Critical Risk", len(filtered[filtered["Risk Level"] == "CRITICAL"]))
+kpi5.metric("Avg Delay (min)", round(filtered["Delay Minutes"].mean(), 1))
 
-airlines = ["All Airlines"] + sorted(df["airline"].dropna().unique())
-aircraft_types = ["All Types"] + sorted(df["aircraft_type"].dropna().unique())
-origins = ["All Origins"] + sorted(df["origin"].dropna().unique())
-destinations = ["All Destinations"] + sorted(df["destination"].dropna().unique())
+# --- Globe Visualization ---
+st.subheader("🌍 Global Aircraft Tracking")
 
-selected_airline = st.sidebar.selectbox("Airline", airlines)
-selected_aircraft_type = st.sidebar.selectbox("Aircraft Type", aircraft_types)
-selected_origin = st.sidebar.selectbox("Origin Airport", origins)
-selected_destination = st.sidebar.selectbox("Destination Airport", destinations)
+def show_globe(df):
+    fig = go.Figure()
 
-filtered_df = df.copy()
-if selected_airline != "All Airlines":
-    filtered_df = filtered_df[filtered_df["airline"] == selected_airline]
-if selected_aircraft_type != "All Types":
-    filtered_df = filtered_df[filtered_df["aircraft_type"] == selected_aircraft_type]
-if selected_origin != "All Origins":
-    filtered_df = filtered_df[filtered_df["origin"] == selected_origin]
-if selected_destination != "All Destinations":
-    filtered_df = filtered_df[filtered_df["destination"] == selected_destination]
+    # Earth sphere
+    u = np.linspace(0, 2*np.pi, 60)
+    v = np.linspace(0, np.pi, 30)
+    x = np.outer(np.cos(u), np.sin(v))
+    y = np.outer(np.sin(u), np.sin(v))
+    z = np.outer(np.ones_like(u), np.cos(v))
+    fig.add_surface(x=x, y=y, z=z, colorscale="Blues", opacity=0.3, showscale=False)
 
-# -----------------------------
-# SUMMARY STATS
-# -----------------------------
-col1, col2, col3, col4, col5 = st.columns(5)
-col1.metric("Total Flights", len(filtered_df))
-col2.metric("In-Flight", len(filtered_df[filtered_df["status"] == "IN-FLIGHT"]))
-col3.metric("Delayed", len(filtered_df[filtered_df["status"] == "DELAYED"]))
-col4.metric("Critical Risk", len(filtered_df[filtered_df["risk_level"] == "CRITICAL"]))
-col5.metric("Avg Delay (min)", round(filtered_df["delay_minutes"].mean(), 1))
+    # Flight paths
+    for _, row in df.iterrows():
+        arc_lats = np.linspace(row["Origin Lat"], row["Dest Lat"], 30)
+        arc_lons = np.linspace(row["Origin Lng"], row["Dest Lng"], 30)
+        arc_z = np.linspace(0.02, 0.1, 30)
 
-# -----------------------------
-# 3D GLOBE (Pydeck)
-# -----------------------------
-if "current_lat" in filtered_df.columns and "current_lng" in filtered_df.columns:
-    st.markdown("### 🌍 Global Aircraft Tracking")
+        fig.add_trace(go.Scatter3d(
+            x=np.cos(np.radians(arc_lons)) * np.cos(np.radians(arc_lats)),
+            y=np.sin(np.radians(arc_lons)) * np.cos(np.radians(arc_lats)),
+            z=np.sin(np.radians(arc_lats)) + arc_z,
+            mode="lines",
+            line=dict(color="yellow", width=2),
+            opacity=0.4,
+            hoverinfo="skip"
+        ))
 
-    layer = pdk.Layer(
-        "ScatterplotLayer",
-        data=filtered_df,
-        get_position=["current_lng", "current_lat"],
-        get_color=[
-            "255 * (risk_level == 'CRITICAL')",
-            "200 * (risk_level == 'HIGH')",
-            "100 * (risk_level == 'MEDIUM')",
-            "50 * (risk_level == 'LOW')",
+    # Aircraft markers
+    fig.add_trace(go.Scatter3d(
+        x=np.cos(np.radians(df["Longitude"])) * np.cos(np.radians(df["Latitude"])),
+        y=np.sin(np.radians(df["Longitude"])) * np.cos(np.radians(df["Latitude"])),
+        z=np.sin(np.radians(df["Latitude"])),
+        mode="markers",
+        marker=dict(
+            size=np.clip(df["Delay Minutes"]/15, 4, 15),
+            color=df["Incident Probability"],
+            colorscale="Reds",
+            opacity=0.9
+        ),
+        text=[
+            f"✈ {row['Flight ID']} | {row['Airline']} ({row['Aircraft Type']})<br>"
+            f"{row['Origin']} → {row['Destination']}<br>"
+            f"Departure: {row['Scheduled Departure']}<br>"
+            f"Arrival: {row['Actual Arrival']}<br>"
+            f"Delay: {row['Delay Minutes']} min<br>"
+            f"Risk: {row['Risk Level']} ({row['Reason']})"
+            for _, row in df.iterrows()
         ],
-        get_radius=50000,
-        pickable=True,
+        hoverinfo="text"
+    ))
+
+    fig.update_layout(
+        scene=dict(xaxis=dict(visible=False), yaxis=dict(visible=False), zaxis=dict(visible=False)),
+        margin=dict(l=0, r=0, t=0, b=0),
+        paper_bgcolor="rgba(0,0,0,0)"
     )
+    st.plotly_chart(fig, use_container_width=True)
 
-    view_state = pdk.ViewState(latitude=20, longitude=78, zoom=3, pitch=30)
+show_globe(filtered)
 
-    st.pydeck_chart(pdk.Deck(layers=[layer],
-                             initial_view_state=view_state,
-                             map_style="mapbox://styles/mapbox/dark-v10"))
+# --- High Risk Flights Requiring Action ---
+st.subheader("⚠️ Flights Requiring Action (High/Critical Risk)")
+action_df = filtered[filtered["Risk Level"].isin(["HIGH", "CRITICAL"])][
+    ["Flight ID", "Airline", "Aircraft Type", "Origin", "Destination", 
+     "Scheduled Departure", "Delay Minutes", "Risk Level", "Reason"]
+].sort_values("Risk Level", ascending=False)
+
+if action_df.empty:
+    st.success("✅ No immediate actions required. All flights are safe.")
 else:
-    st.warning("⚠️ No geolocation data available for flights.")
-
-# -----------------------------
-# FLIGHT TABLE WITH REASONS
-# -----------------------------
-st.markdown("### ✈️ Flight Monitor (with Delay & Risk Reasons)")
-
-display_df = filtered_df.copy()
-
-# Add Delay Reason Column
-def get_delay_reason(row):
-    reasons = []
-    if row.get("weather_delay", 0) > 15:
-        reasons.append("Weather")
-    if row.get("technical_delay", 0) > 15:
-        reasons.append("Technical")
-    if row.get("atc_delay", 0) > 10:
-        reasons.append("ATC")
-    return ", ".join(reasons) if reasons else "On-Time"
-
-display_df["Delay Reason"] = display_df.apply(get_delay_reason, axis=1)
-
-# Add Incident History + Action
-def get_incident_info(row):
-    if row["risk_level"] in ["CRITICAL", "HIGH", "MEDIUM"]:
-        reason = np.random.choice(incident_reasons[row["risk_level"]])
-        action = action_plan[row["risk_level"]]
-        return f"{reason}\n{action}"
-    else:
-        return "🟢 No incidents. Safe to operate."
-
-display_df["Incident History"] = display_df.apply(get_incident_info, axis=1)
-
-# Final columns
-cols = [
-    "flight_id", "airline", "aircraft_type", "origin", "destination",
-    "scheduled_departure", "actual_departure", "status",
-    "risk_level", "delay_minutes", "Delay Reason", "Incident History"
-]
-
-st.dataframe(display_df[cols].head(20), use_container_width=True)
-
-# -----------------------------
-# INCIDENT LOG PANEL (WATCHLIST)
-# -----------------------------
-st.markdown("### 🚨 Incident Watchlist (High & Critical Risk Flights)")
-
-incident_watchlist = display_df[display_df["risk_level"].isin(["CRITICAL", "HIGH"])]
-
-if incident_watchlist.empty:
-    st.success("🟢 No High or Critical risk flights at the moment. All safe!")
-else:
-    for _, row in incident_watchlist.iterrows():
-        st.markdown(f"""
-        <div style="background:#1E1E1E; border-left:5px solid {'#FF0000' if row['risk_level']=='CRITICAL' else '#FFA500'};
-                    padding:10px; margin-bottom:10px; border-radius:5px;">
-            <h4 style="color:#4FC3F7;">✈️ Flight {row['flight_id']} | {row['airline']} ({row['aircraft_type']})</h4>
-            <p style="color:white;">🛫 {row['origin']} ➝ {row['destination']}</p>
-            <p style="color:grey;">Scheduled: {row['scheduled_departure']} | Actual: {row['actual_departure']}</p>
-            <p style="color:{'red' if row['risk_level']=='CRITICAL' else 'orange'};">
-                <b>Risk Level: {row['risk_level']}</b>
-            </p>
-            <p style="color:white;">Reason: {row['Incident History'].splitlines()[0]}</p>
-            <p style="color:#00FFAA;">Action: {action_plan[row['risk_level']]}</p>
-        </div>
-        """, unsafe_allow_html=True)
+    st.dataframe(action_df, use_container_width=True)
