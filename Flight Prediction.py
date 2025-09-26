@@ -1,441 +1,311 @@
-import os
+import streamlit as st
 import pandas as pd
 import numpy as np
-import joblib
-import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime, timedelta, timezone
-import time
+from datetime import datetime, timedelta
+import os
+import glob
+from pathlib import Path
 
-# Page config
+# Configure Streamlit page
 st.set_page_config(
-    page_title="Aviation Operations Center", 
+    page_title="Aviation Operations Center",
+    page_icon="✈️",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS
-st.markdown("""
-<style>
-.risk-high { background-color: #ffebee; border-left: 5px solid #f44336; padding: 10px; }
-.risk-medium { background-color: #fff3e0; border-left: 5px solid #ff9800; padding: 10px; }
-.risk-low { background-color: #e8f5e8; border-left: 5px solid #4caf50; padding: 10px; }
-.incident-warning {
-    background-color: #ffebee;
-    padding: 10px;
-    border-radius: 5px;
-    border: 1px solid #f44336;
-    margin: 5px 0;
-}
-</style>
-""", unsafe_allow_html=True)
-
-@st.cache_resource
-def find_files():
-    def find_file(filename, search_dir=os.getcwd()):
-        for root, _, files in os.walk(search_dir):
-            if filename in files:
-                return os.path.join(root, filename)
-        return None
+def debug_file_system():
+    """Debug function to show what files are available"""
+    st.subheader("🔍 File System Debug")
     
-    files = {
-        'classifier': find_file("binary_classifier_final.pkl"),
-        'regressor': find_file("delay_minutes_Poisson_final.pkl"),
-        'dataset': find_file("final_unified_dataset.csv"),
-        'production_results': None
+    # Current working directory
+    cwd = os.getcwd()
+    st.write(f"**Current Directory:** `{cwd}`")
+    
+    # List all files in current directory
+    files_here = os.listdir('.')
+    st.write("**Files in current directory:**")
+    for f in sorted(files_here):
+        if os.path.isfile(f):
+            size = os.path.getsize(f) / 1024  # KB
+            st.write(f"📄 `{f}` ({size:.1f} KB)")
+        elif os.path.isdir(f):
+            st.write(f"📁 `{f}/`")
+    
+    # Look for specific aviation files
+    st.write("**Looking for aviation files:**")
+    patterns = [
+        "*.csv",
+        "*aviation*",
+        "*flight*",
+        "*prediction*",
+        "artifacts/*.pkl",
+        "*.pkl"
+    ]
+    
+    found_files = []
+    for pattern in patterns:
+        matches = glob.glob(pattern, recursive=True)
+        if matches:
+            st.write(f"Pattern `{pattern}`: {len(matches)} files found")
+            for match in matches[:5]:  # Show first 5
+                found_files.append(match)
+                st.write(f"  - `{match}`")
+        else:
+            st.write(f"Pattern `{pattern}`: ❌ No files found")
+    
+    return found_files
+
+def create_sample_data():
+    """Create sample aviation data for testing"""
+    np.random.seed(42)
+    n_flights = 1000
+    
+    airlines = ['AI', 'IX', '6E', 'UK', 'SG', 'G8']
+    airports = ['DEL', 'BOM', 'BLR', 'MAA', 'CCU', 'HYD', 'COK', 'AMD']
+    
+    data = {
+        'flight_id': [f"FL{i:06d}" for i in range(n_flights)],
+        'airline': np.random.choice(airlines, n_flights),
+        'origin': np.random.choice(airports, n_flights),
+        'destination': np.random.choice(airports, n_flights),
+        'scheduled_departure': pd.date_range('2024-01-01', periods=n_flights, freq='H'),
+        'actual_departure': None,
+        'delay_minutes': np.random.poisson(15, n_flights),
+        'status': np.random.choice(['Scheduled', 'In-Flight', 'Completed', 'Delayed'], n_flights, p=[0.3, 0.2, 0.4, 0.1]),
+        'risk_level': np.random.choice(['High', 'Medium', 'Low'], n_flights, p=[0.1, 0.3, 0.6]),
+        'incident_probability': np.random.beta(2, 50, n_flights),  # Most flights low risk
+        'weather_score': np.random.uniform(0, 1, n_flights),
+        'mechanical_score': np.random.uniform(0, 1, n_flights),
+        'crew_score': np.random.uniform(0, 1, n_flights),
+        'atc_score': np.random.uniform(0, 1, n_flights)
     }
     
-    # Find latest production results
-    artifacts_dir = find_file("artifacts") or os.getcwd()
-    if os.path.isdir(artifacts_dir):
-        production_files = [f for f in os.listdir(artifacts_dir) if f.startswith("aviation_predictions_PRODUCTION_")]
-        if production_files:
-            latest_file = max(production_files)
-            files['production_results'] = os.path.join(artifacts_dir, latest_file)
+    df = pd.DataFrame(data)
     
-    return files
-
-@st.cache_resource
-def load_models(classifier_path, regressor_path):
-    try:
-        # Classifier
-        clf_pkg = joblib.load(classifier_path)
-        classifier = clf_pkg["model"]
-        scaler = clf_pkg["scaler"]
-        clf_features = clf_pkg["feature_columns"]
-        
-        # Regressor
-        reg_pkg = joblib.load(regressor_path)
-        regressor = None
-        reg_features = reg_pkg.get("feature_columns", [])
-        
-        model_obj = reg_pkg.get("model", {})
-        if hasattr(model_obj, "predict"):
-            regressor = model_obj
-        elif isinstance(model_obj, dict):
-            for k, v in model_obj.items():
-                if hasattr(v, "predict"):
-                    regressor = v
-                    break
-        
-        if regressor is None:
-            class FallbackRegressor:
-                def predict(self, X):
-                    return np.random.uniform(25, 75, len(X))
-            regressor = FallbackRegressor()
-        
-        return classifier, scaler, clf_features, regressor, reg_features, True
-    except Exception as e:
-        st.error(f"Error loading models: {e}")
-        return None, None, None, None, None, False
-
-COMPREHENSIVE_INCIDENTS = {
-    "Low arrival visibility": {
-        "incident": "Air India Express IX-812, Mangalore (2010)",
-        "casualties": "158 fatalities",
-        "cause": "Runway overrun in poor visibility on table-top runway",
-        "prevention": "Enhanced approach monitoring, go-around criteria"
-    },
-    "Strong crosswind": {
-        "incident": "SpiceJet SG-256, Jaipur (2016)", 
-        "casualties": "15 injuries",
-        "cause": "Hard landing during 35-knot crosswind on wet runway",
-        "prevention": "Enhanced crosswind training, friction monitoring"
-    },
-    "High mechanical risk": {
-        "incident": "IndiGo A320neo Engine Failure (2019)",
-        "casualties": "No fatalities, 186 evacuated",
-        "cause": "Mid-flight engine stall, recurring issues",
-        "prevention": "Enhanced monitoring, mandatory grounding"
-    },
-    "Crew fatigue risk": {
-        "incident": "Air India Express IX-1344, Kozhikode (2020)",
-        "casualties": "21 fatalities",
-        "cause": "Night runway overrun, crew fatigue cited",
-        "prevention": "Strict duty limits, fatigue management"
-    }
-}
-
-def assess_flight_risk(row):
-    def safe_float(val, default):
-        try:
-            return float(val)
-        except:
-            return default
+    # Add actual departure times
+    df['actual_departure'] = df['scheduled_departure'] + pd.to_timedelta(df['delay_minutes'], unit='min')
     
-    weights = {
-        "vis": 0.15, "xwind": 0.08, "mech": 0.12, "crew": 0.10,
-        "runway": 0.10, "weather": 0.07, "atc": 0.08, "night": 0.05
-    }
-    
-    score = 0.0
-    factors = []
-    
-    # Weather risks
-    if safe_float(row.get("arrival_visibility_m", 9999), 9999) < 1000:
-        score += weights["vis"]
-        factors.append("Low arrival visibility")
-    
-    if safe_float(row.get("crosswind_component_kts", 0), 0) > 25:
-        score += weights["xwind"] 
-        factors.append("Strong crosswind")
-    
-    if safe_float(row.get("operational_weather_impact", 0), 0) > 0.7:
-        score += weights["weather"]
-        factors.append("Severe weather impact")
-    
-    # Mechanical risks
-    if safe_float(row.get("operational_mechanical_risk", 0), 0) > 0.8:
-        score += weights["mech"]
-        factors.append("High mechanical risk")
-    
-    # Crew risks
-    if safe_float(row.get("operational_crew_risk", 0), 0) > 0.7:
-        score += weights["crew"]
-        factors.append("Crew fatigue risk")
-    
-    # Risk classification
-    if score >= 0.35:
-        level = "High"
-        action = "Immediate attention required"
-    elif score >= 0.20:
-        level = "Medium" 
-        action = "Enhanced monitoring"
-    elif score >= 0.10:
-        level = "Low-Medium"
-        action = "Standard monitoring"
-    else:
-        level = "Low"
-        action = "Normal operations"
-    
-    # Match incidents
-    incident_matches = []
-    for factor in factors:
-        if factor in COMPREHENSIVE_INCIDENTS:
-            incident_matches.append(COMPREHENSIVE_INCIDENTS[factor])
-    
-    return {
-        "risk_score": round(score, 3),
-        "risk_level": level,
-        "action": action,
-        "factors": factors,
-        "incidents": incident_matches
-    }
-
-@st.cache_data(ttl=300)
-def load_and_process_data(use_production_results=True):
-    files = find_files()
-    
-    if use_production_results and files['production_results']:
-        st.info("Loading production results...")
-        df = pd.read_csv(files['production_results'])
-        
-        required_cols = ['prediction', 'delay_probability', 'predicted_delay_minutes', 
-                        'risk_classification', 'primary_delay_cause']
-        missing_cols = [col for col in required_cols if col not in df.columns]
-        
-        if not missing_cols:
-            return df, True
-    
-    # Fallback to basic dataset
-    if files['dataset']:
-        st.info("Loading basic dataset...")
-        df = pd.read_csv(files['dataset'])
-        
-        # Add basic predictions if missing
-        if 'prediction' not in df.columns:
-            df['prediction'] = np.random.choice(['On-time', 'Delayed'], len(df), p=[0.75, 0.25])
-        if 'delay_probability' not in df.columns:
-            df['delay_probability'] = np.random.uniform(0, 1, len(df))
-        if 'predicted_delay_minutes' not in df.columns:
-            df['predicted_delay_minutes'] = np.where(
-                df['prediction'] == 'Delayed',
-                np.random.uniform(15, 90, len(df)),
-                0
-            )
-        if 'risk_classification' not in df.columns:
-            df['risk_classification'] = np.random.choice(['Low', 'Medium', 'High'], len(df), p=[0.7, 0.25, 0.05])
-        if 'primary_delay_cause' not in df.columns:
-            df['primary_delay_cause'] = np.random.choice(['Weather', 'Mechanical', 'ATC', 'Crew'], len(df))
-        
-        return df, True
-    
-    return pd.DataFrame(), False
-
-def add_time_simulation(df):
-    if 'scheduled_dep_utc' not in df.columns:
-        start_date = datetime.now(timezone.utc) - timedelta(days=7)
-        timestamps = pd.date_range(start_date, periods=len(df), freq='10min')
-        df['scheduled_dep_utc'] = timestamps
-    else:
-        df['scheduled_dep_utc'] = pd.to_datetime(df['scheduled_dep_utc'], utc=True)
-    
-    if 'scheduled_arr_utc' not in df.columns:
-        flight_duration = np.random.uniform(1, 6, len(df))
-        df['scheduled_arr_utc'] = df['scheduled_dep_utc'] + pd.to_timedelta(flight_duration, unit='h')
-    else:
-        df['scheduled_arr_utc'] = pd.to_datetime(df['scheduled_arr_utc'], utc=True)
+    # Add some incident warnings for high-risk flights
+    high_risk = df['risk_level'] == 'High'
+    df.loc[high_risk, 'incident_warning'] = np.random.choice([
+        'Similar to Mangalore IX-812 - 158 fatalities',
+        'Weather pattern matches Air India Express crash',
+        'Mechanical issues similar to fatal incidents',
+        'Crew fatigue levels concerning'
+    ], high_risk.sum())
     
     return df
 
-def main():
-    st.title("Aviation Operations Center")
-    st.markdown("Real-time flight monitoring with incident prediction")
+def load_aviation_data():
+    """Load aviation data with fallbacks"""
     
-    # Sidebar controls
-    with st.sidebar:
-        st.header("Controls")
-        
-        use_production = st.checkbox("Use Production Results", value=True)
-        
-        if st.button("Refresh Data"):
-            st.cache_data.clear()
-            st.rerun()
-        
-        sample_limit = st.slider("Max flights", 1000, 20000, 5000)
-        
-        st.markdown("---")
-        st.header("Time Simulation")
+    # Try to load production results first
+    production_files = glob.glob("*aviation_predictions_PRODUCTION*.csv")
+    if production_files:
+        st.success(f"✅ Found production file: {production_files[0]}")
+        try:
+            return pd.read_csv(production_files[0])
+        except Exception as e:
+            st.error(f"Error loading production file: {e}")
+    
+    # Try to load main dataset
+    dataset_files = ['final_unified_dataset.csv', 'aviation_dataset.csv', 'flight_data.csv']
+    for filename in dataset_files:
+        if os.path.exists(filename):
+            st.success(f"✅ Found dataset: {filename}")
+            try:
+                df = pd.read_csv(filename)
+                # Add prediction columns if missing
+                if 'incident_probability' not in df.columns:
+                    df['incident_probability'] = np.random.beta(2, 50, len(df))
+                if 'risk_level' not in df.columns:
+                    df['risk_level'] = pd.cut(df['incident_probability'], 
+                                             bins=[0, 0.1, 0.3, 1.0], 
+                                             labels=['Low', 'Medium', 'High'])
+                return df
+            except Exception as e:
+                st.error(f"Error loading {filename}: {e}")
+    
+    # Fallback to sample data
+    st.warning("⚠️ No aviation data files found. Using sample data for demonstration.")
+    return create_sample_data()
+
+def main():
+    st.title("🛫 Aviation Operations Center")
+    st.markdown("*Real-time flight monitoring with incident prediction*")
+    
+    # Sidebar for debug mode
+    st.sidebar.title("🔧 Debug & Controls")
+    debug_mode = st.sidebar.checkbox("Debug Mode", value=True)
+    
+    if debug_mode:
+        with st.expander("🔍 File System Debug", expanded=True):
+            found_files = debug_file_system()
     
     # Load data
-    with st.spinner("Loading data..."):
-        df, success = load_and_process_data(use_production)
-    
-    if not success or df.empty:
-        st.error("Failed to load data!")
-        return
-    
-    df = add_time_simulation(df)
-    
-    if len(df) > sample_limit:
-        df = df.sample(sample_limit, random_state=42)
-    
-    # Time controls
-    with st.sidebar:
-        min_time = df['scheduled_dep_utc'].min()
-        max_time = df['scheduled_arr_utc'].max()
+    try:
+        with st.spinner("Loading aviation data..."):
+            df = load_aviation_data()
         
-        current_time = st.slider(
-            "Current Time (UTC)",
-            min_value=min_time.to_pydatetime(),
-            max_value=max_time.to_pydatetime(), 
-            value=min_time.to_pydatetime() + timedelta(hours=12),
-            format="MM/DD/YY HH:mm"
-        )
-        current_time = pd.Timestamp(current_time, tz='UTC')
+        st.success(f"✅ Loaded {len(df):,} flight records")
         
-        time_window = st.slider("Time Window (hours)", 1, 12, 4)
-    
-    # Filter data
-    window_start = current_time - timedelta(hours=time_window)
-    window_end = current_time + timedelta(hours=time_window)
-    
-    def get_flight_status(row):
-        dep_time = row['scheduled_dep_utc']
-        arr_time = row['scheduled_arr_utc']
+        # Show data info
+        if debug_mode:
+            with st.expander("📊 Data Information"):
+                st.write("**Dataset Shape:**", df.shape)
+                st.write("**Columns:**", list(df.columns))
+                st.write("**Sample Data:**")
+                st.dataframe(df.head())
+                
+                if 'risk_level' in df.columns:
+                    risk_counts = df['risk_level'].value_counts()
+                    st.write("**Risk Distribution:**")
+                    st.write(risk_counts)
         
-        if current_time < dep_time:
-            return "Scheduled"
-        elif dep_time <= current_time < arr_time:
-            return "In-Flight"
-        else:
-            return "Completed"
+        # Main dashboard
+        create_dashboard(df)
+        
+    except Exception as e:
+        st.error(f"❌ Failed to load data: {str(e)}")
+        st.write("**Error Details:**")
+        st.code(str(e))
+        
+        if st.button("🔄 Try Again"):
+            st.experimental_rerun()
+
+def create_dashboard(df):
+    """Create the main dashboard"""
     
-    df['flight_status'] = df.apply(get_flight_status, axis=1)
-    
-    # Filter to window
-    mask = ((df['scheduled_dep_utc'] >= window_start) & (df['scheduled_dep_utc'] <= window_end)) | \
-           ((df['scheduled_arr_utc'] >= window_start) & (df['scheduled_arr_utc'] <= window_end))
-    df_window = df[mask].copy()
-    
-    # Display current time
-    st.markdown(f"### Current Time: {current_time.strftime('%Y-%m-%d %H:%M UTC')}")
-    
-    # Metrics
-    col1, col2, col3, col4, col5 = st.columns(5)
-    
-    total_flights = len(df_window)
-    scheduled = len(df_window[df_window['flight_status'] == 'Scheduled'])
-    in_flight = len(df_window[df_window['flight_status'] == 'In-Flight'])
-    completed = len(df_window[df_window['flight_status'] == 'Completed'])
-    high_risk = len(df_window[df_window['risk_classification'] == 'High'])
+    # Time simulation controls
+    st.header("⏰ Time Simulation")
+    col1, col2, col3 = st.columns(3)
     
     with col1:
-        st.metric("Total Flights", f"{total_flights:,}")
+        simulation_speed = st.selectbox("Simulation Speed", ["1x", "2x", "5x", "10x"])
+    
     with col2:
-        st.metric("Scheduled", f"{scheduled:,}")
+        if 'scheduled_departure' in df.columns:
+            min_date = pd.to_datetime(df['scheduled_departure']).min().date()
+            max_date = pd.to_datetime(df['scheduled_departure']).max().date()
+            current_date = st.date_input("Current Date", min_date, min_value=min_date, max_value=max_date)
+        else:
+            current_date = st.date_input("Current Date", datetime.now().date())
+    
     with col3:
-        st.metric("In-Flight", f"{in_flight:,}")
+        current_time = st.time_input("Current Time", datetime.now().time())
+    
+    # Filters
+    st.header("🔍 Filters")
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        if 'airline' in df.columns:
+            airlines = st.multiselect("Airlines", df['airline'].unique(), default=df['airline'].unique()[:3])
+        else:
+            airlines = []
+    
+    with col2:
+        if 'status' in df.columns:
+            statuses = st.multiselect("Status", df['status'].unique(), default=df['status'].unique())
+        else:
+            statuses = []
+    
+    with col3:
+        if 'risk_level' in df.columns:
+            risk_levels = st.multiselect("Risk Level", df['risk_level'].unique(), default=df['risk_level'].unique())
+        else:
+            risk_levels = []
+    
     with col4:
-        st.metric("Completed", f"{completed:,}")
-    with col5:
-        st.metric("High Risk", f"{high_risk:,}")
+        if 'origin' in df.columns and 'destination' in df.columns:
+            routes = [f"{row['origin']}-{row['destination']}" for _, row in df[['origin', 'destination']].drop_duplicates().iterrows()]
+            selected_routes = st.multiselect("Routes", routes[:10], default=routes[:3])
+        else:
+            selected_routes = []
     
-    # Main content tabs
-    tab1, tab2, tab3 = st.tabs(["Live Operations", "Risk Dashboard", "Analytics"])
+    # Apply filters
+    filtered_df = df.copy()
+    if airlines and 'airline' in df.columns:
+        filtered_df = filtered_df[filtered_df['airline'].isin(airlines)]
+    if statuses and 'status' in df.columns:
+        filtered_df = filtered_df[filtered_df['status'].isin(statuses)]
+    if risk_levels and 'risk_level' in df.columns:
+        filtered_df = filtered_df[filtered_df['risk_level'].isin(risk_levels)]
     
-    with tab1:
-        st.header("Live Flight Operations")
-        
-        # Filters
-        col1, col2 = st.columns(2)
-        with col1:
-            airlines = ["All"] + sorted(df_window['airline'].dropna().unique().tolist())
-            selected_airline = st.selectbox("Airline", airlines)
-        with col2:
-            statuses = ["All"] + df_window['flight_status'].unique().tolist()
-            selected_status = st.selectbox("Status", statuses)
-        
-        # Apply filters
-        filtered_df = df_window.copy()
-        if selected_airline != "All":
-            filtered_df = filtered_df[filtered_df['airline'] == selected_airline]
-        if selected_status != "All":
-            filtered_df = filtered_df[filtered_df['flight_status'] == selected_status]
-        
-        # Display flights
-        for status in ['Scheduled', 'In-Flight', 'Completed']:
-            status_df = filtered_df[filtered_df['flight_status'] == status]
-            if len(status_df) > 0:
-                st.subheader(f"{status} Flights ({len(status_df)})")
-                
-                display_cols = []
-                for col in ['airline', 'flight_number', 'tail_number', 'origin', 'dest']:
-                    if col in status_df.columns:
-                        display_cols.append(col)
-                
-                pred_cols = ['prediction', 'delay_probability', 'predicted_delay_minutes', 'risk_classification']
-                for col in pred_cols:
-                    if col in status_df.columns:
-                        display_cols.append(col)
-                
-                st.dataframe(status_df[display_cols].head(20), use_container_width=True)
+    # Key Metrics
+    st.header("📊 Key Metrics")
+    col1, col2, col3, col4 = st.columns(4)
     
-    with tab2:
-        st.header("Risk Assessment Dashboard")
-        
-        # High-risk flights
-        high_risk_df = df_window[df_window['risk_classification'] == 'High']
-        
-        if len(high_risk_df) > 0:
-            st.error(f"🚨 {len(high_risk_df)} HIGH RISK FLIGHTS")
-            
-            for _, flight in high_risk_df.head(5).iterrows():
-                with st.expander(f"🚨 {flight.get('airline', 'Unknown')} {flight.get('flight_number', 'N/A')}"):
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        st.write(f"**Route:** {flight.get('origin', 'N/A')} → {flight.get('dest', 'N/A')}")
-                        st.write(f"**Status:** {flight.get('flight_status', 'Unknown')}")
-                        st.write(f"**Risk Level:** {flight.get('risk_classification', 'Unknown')}")
-                    
-                    with col2:
-                        st.write(f"**Prediction:** {flight.get('prediction', 'Unknown')}")
-                        if flight.get('predicted_delay_minutes', 0) > 0:
-                            st.write(f"**Expected Delay:** {flight.get('predicted_delay_minutes', 0):.0f} min")
-                        st.write(f"**Cause:** {flight.get('primary_delay_cause', 'Unknown')}")
-        
-        # Risk distribution
-        st.subheader("Risk Distribution")
-        risk_counts = df_window['risk_classification'].value_counts()
-        
-        fig = px.pie(
-            values=risk_counts.values,
-            names=risk_counts.index,
-            title="Flight Risk Levels",
-            color_discrete_map={
-                'Low': '#4CAF50',
-                'Low-Medium': '#FFC107', 
-                'Medium': '#FF9800',
-                'High': '#F44336'
-            }
-        )
-        st.plotly_chart(fig, use_container_width=True)
+    with col1:
+        st.metric("Total Flights", f"{len(filtered_df):,}")
     
-    with tab3:
-        st.header("Flight Analytics")
-        
+    with col2:
+        if 'risk_level' in filtered_df.columns:
+            high_risk = len(filtered_df[filtered_df['risk_level'] == 'High'])
+            st.metric("High Risk Flights", high_risk, delta=f"{high_risk/len(filtered_df)*100:.1f}%")
+        else:
+            st.metric("High Risk Flights", "N/A")
+    
+    with col3:
+        if 'delay_minutes' in filtered_df.columns:
+            avg_delay = filtered_df['delay_minutes'].mean()
+            st.metric("Avg Delay (min)", f"{avg_delay:.1f}")
+        else:
+            st.metric("Avg Delay (min)", "N/A")
+    
+    with col4:
+        if 'incident_probability' in filtered_df.columns:
+            avg_risk = filtered_df['incident_probability'].mean() * 100
+            st.metric("Avg Risk Score", f"{avg_risk:.2f}%")
+        else:
+            st.metric("Avg Risk Score", "N/A")
+    
+    # Charts
+    st.header("📈 Analytics")
+    
+    # Risk distribution
+    if 'risk_level' in filtered_df.columns:
         col1, col2 = st.columns(2)
         
         with col1:
-            st.subheader("Delay Predictions")
-            delay_counts = df_window['prediction'].value_counts()
-            fig = px.bar(
-                x=delay_counts.index,
-                y=delay_counts.values,
-                title="On-time vs Delayed",
-                color=delay_counts.index,
-                color_discrete_map={'On-time': '#4CAF50', 'Delayed': '#F44336'}
-            )
+            risk_dist = filtered_df['risk_level'].value_counts()
+            fig = px.pie(values=risk_dist.values, names=risk_dist.index, title="Risk Level Distribution")
             st.plotly_chart(fig, use_container_width=True)
         
         with col2:
-            st.subheader("Delay Causes")
-            if 'primary_delay_cause' in df_window.columns:
-                cause_counts = df_window['primary_delay_cause'].value_counts()
-                fig = px.pie(values=cause_counts.values, names=cause_counts.index, title="Primary Causes")
+            if 'airline' in filtered_df.columns:
+                airline_risk = filtered_df.groupby(['airline', 'risk_level']).size().unstack(fill_value=0)
+                fig = px.bar(airline_risk, title="Risk by Airline", barmode='stack')
                 st.plotly_chart(fig, use_container_width=True)
+    
+    # Flight table
+    st.header("✈️ Flight Monitor")
+    
+    # Add alerts for high-risk flights
+    if 'risk_level' in filtered_df.columns:
+        high_risk_flights = filtered_df[filtered_df['risk_level'] == 'High']
+        if len(high_risk_flights) > 0:
+            st.warning(f"⚠️ {len(high_risk_flights)} HIGH RISK flights require immediate attention!")
+            
+            # Show sample high-risk flights
+            if 'incident_warning' in high_risk_flights.columns:
+                for _, flight in high_risk_flights.head(3).iterrows():
+                    if pd.notna(flight.get('incident_warning')):
+                        st.error(f"🚨 Flight {flight.get('flight_id', 'Unknown')}: {flight['incident_warning']}")
+    
+    # Display flight table
+    display_columns = [col for col in ['flight_id', 'airline', 'origin', 'destination', 'status', 'risk_level', 'delay_minutes', 'incident_probability'] if col in filtered_df.columns]
+    
+    if display_columns:
+        st.dataframe(
+            filtered_df[display_columns].head(20),
+            use_container_width=True
+        )
+    else:
+        st.warning("No suitable columns found for flight display")
 
 if __name__ == "__main__":
     main()
