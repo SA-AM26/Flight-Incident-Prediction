@@ -10,7 +10,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.metrics import classification_report, mean_squared_error
+from sklearn.metrics import classification_report
 from sklearn.model_selection import train_test_split
 
 # ---------------------------------------------------------------------
@@ -92,7 +92,6 @@ def generate_realistic_aviation_data(n_flights: int = 10000) -> pd.DataFrame:
         base_date = datetime(2024, 1, 1) + timedelta(days=np.random.randint(0, 366))
         sched_dep = base_date + timedelta(hours=np.random.randint(5, 23), minutes=int(np.random.choice([0, 15, 30, 45])))
 
-        # Condition scores
         age = np.random.uniform(1, 20)
         hours = np.random.uniform(5_000, 80_000)
         cycles = hours / 1.5
@@ -145,13 +144,11 @@ def generate_realistic_aviation_data(n_flights: int = 10000) -> pd.DataFrame:
             {
                 "flight_id": f'{info["code"]}{1000 + i}',
                 "airline": airline,
-                "airline_code": info["code"],
+                "aircraft_code": info["code"],
                 "aircraft_type": a_type,
                 "tail_number": tail,
                 "origin": origin,
                 "destination": dest,
-                "origin_name": airports[origin]["name"],
-                "destination_name": airports[dest]["name"],
                 "scheduled_departure": sched_dep,
                 "actual_departure": actual_dep,
                 "delay_minutes": total_delay,
@@ -173,24 +170,12 @@ def generate_realistic_aviation_data(n_flights: int = 10000) -> pd.DataFrame:
                 "environmental_risk": env_risk,
                 "incident_probability": incident_prob,
                 "risk_level": risk_level,
-                "origin_lat": airports[origin]["lat"],
-                "origin_lng": airports[origin]["lng"],
-                "dest_lat": airports[dest]["lat"],
-                "dest_lng": airports[dest]["lng"],
                 "current_lat": airports[origin]["lat"] + (airports[dest]["lat"] - airports[origin]["lat"]) * np.random.random(),
                 "current_lng": airports[origin]["lng"] + (airports[dest]["lng"] - airports[origin]["lng"]) * np.random.random(),
-                "altitude": int(np.random.randint(25000, 42000) if status == "IN-FLIGHT" else 0),
-                "speed": int(np.random.randint(400, 550) if status == "IN-FLIGHT" else 0),
-                "heading": int(np.random.randint(0, 360)),
-                "weather_delay": int(weather_delay),
-                "technical_delay": int(tech_delay),
-                "atc_delay": int(atc_delay),
-                "base_delay": int(base_delay),
             }
         )
 
     return pd.DataFrame(flights)
-
 
 # ---------------------------------------------------------------------
 # ML training & loading
@@ -240,12 +225,8 @@ def ensure_data_and_models():
 
     need_train = not (os.path.exists(INCIDENT_PKL) and os.path.exists(DELAY_PKL) and os.path.exists(FEATURES_PKL))
     if need_train:
-        X_train, X_test, y_inc_train, y_inc_test = train_test_split(
-            X_full, y_incident, test_size=0.2, random_state=42, stratify=y_incident
-        )
-        _, _, y_d_train, y_d_test = train_test_split(
-            X_full, y_delay, test_size=0.2, random_state=42
-        )
+        X_train, _, y_inc_train, _ = train_test_split(X_full, y_incident, test_size=0.2, random_state=42, stratify=y_incident)
+        _, _, y_d_train, _ = train_test_split(X_full, y_delay, test_size=0.2, random_state=42)
 
         clf = RandomForestClassifier(n_estimators=200, random_state=42, class_weight="balanced", n_jobs=-1)
         clf.fit(X_train, y_inc_train)
@@ -266,7 +247,6 @@ def ensure_data_and_models():
         reg = pickle.load(f)
 
     return df, clf, reg
-
 
 # ---------------------------------------------------------------------
 # 3D Globe (Plotly)
@@ -307,7 +287,6 @@ def globe_with_aircraft(df: pd.DataFrame) -> go.Figure:
     )
     return fig
 
-
 # ---------------------------------------------------------------------
 # Prediction helpers
 # ---------------------------------------------------------------------
@@ -320,3 +299,29 @@ def run_predictions(df_row: pd.Series, clf, reg) -> dict:
                 idx1 = int(np.where(clf.classes_ == 1)[0][0])
                 inc_proba = float(proba_row[idx1])
             elif len(clf.classes_) == 1:
+                inc_proba = float(proba_row[0]) if clf.classes_[0] == 1 else 0.0
+            else:
+                inc_proba = 0.0
+        else:
+            inc_proba = 0.0
+    except Exception:
+        inc_proba = 0.0
+
+    delay_pred = float(reg.predict(X)[0])
+    return {"incident_probability": inc_proba, "predicted_delay_minutes": delay_pred}
+
+# ---------------------------------------------------------------------
+# UI
+# ---------------------------------------------------------------------
+def app():
+    st.markdown("## 🛡️ Guardian Eye — Aviation Operations Center")
+
+    df, clf, reg = ensure_data_and_models()
+
+    # Sidebar filters
+    st.sidebar.header("🎛️ Aircraft Selection")
+    airlines = ["All Airlines"] + sorted(df["airline"].unique().tolist())
+    sel_airline = st.sidebar.selectbox("Airline", airlines)
+
+    sub = df.copy()
+    if sel_airline != "All Airlines":
