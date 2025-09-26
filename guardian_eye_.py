@@ -1,541 +1,426 @@
-import React, { useState, useEffect, useRef } from 'react';
-import * as THREE from 'three';
-import { Plane, AlertTriangle, Eye, Globe, Radar, Gauge, Navigation, Activity } from 'lucide-react';
+# guardian_eye.py
+# One-file Streamlit app: data generator + ML models + 3D Guardian Eye dashboard
 
-const GuardianEyeDashboard = () => {
-  const [selectedAirline, setSelectedAirline] = useState('All Airlines');
-  const [selectedTailNumber, setSelectedTailNumber] = useState('All Aircraft');
-  const [selectedAircraftType, setSelectedAircraftType] = useState('All Types');
-  const [selectedAircraft, setSelectedAircraft] = useState(null);
-  const [currentTime, setCurrentTime] = useState(new Date());
-  const [alertLevel, setAlertLevel] = useState('NORMAL');
-  const globeRef = useRef();
-  const sceneRef = useRef();
-  const rendererRef = useRef();
-  const animationRef = useRef();
+import os
+import pickle
+from datetime import datetime, timedelta
 
-  // Realistic aviation data
-  const airlines = [
-    'All Airlines',
-    'Air India (AI)',
-    'IndiGo (6E)', 
-    'SpiceJet (SG)',
-    'Vistara (UK)',
-    'GoFirst (G8)',
-    'AirAsia India (I5)'
-  ];
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.metrics import classification_report, mean_squared_error
+from sklearn.model_selection import train_test_split
 
-  const aircraftTypes = [
-    'All Types',
-    'Boeing 737-800',
-    'Boeing 737 MAX 8',
-    'Airbus A320neo',
-    'Airbus A321',
-    'ATR 72-600',
-    'Bombardier Q400',
-    'Boeing 787-8',
-    'Airbus A350-900'
-  ];
+# ---------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------
+st.set_page_config(page_title="🛡️ Guardian Eye", page_icon="🛡️", layout="wide")
+np.random.seed(42)
 
-  // Generate realistic aircraft data
-  const generateAircraftData = () => {
-    const tailNumbers = [];
-    const aircraftData = [];
-    
-    const prefixes = ['VT-', 'A6-', '9V-', 'HS-'];
-    const suffixes = ['ABC', 'DEF', 'GHI', 'JKL', 'MNO', 'PQR', 'STU', 'VWX', 'YZA'];
-    
-    for (let i = 0; i < 50; i++) {
-      const prefix = prefixes[Math.floor(Math.random() * prefixes.length)];
-      const suffix = suffixes[Math.floor(Math.random() * suffixes.length)];
-      const tailNumber = `${prefix}${suffix}`;
-      tailNumbers.push(tailNumber);
-      
-      const airline = airlines[Math.floor(Math.random() * (airlines.length - 1)) + 1];
-      const aircraftType = aircraftTypes[Math.floor(Math.random() * (aircraftTypes.length - 1)) + 1];
-      
-      // Generate aircraft-specific risk factors
-      const engineHealth = Math.random() * 100;
-      const structuralIntegrity = Math.random() * 100;
-      const avionicsStatus = Math.random() * 100;
-      const maintenanceScore = Math.random() * 100;
-      const pilotExperience = Math.random() * 100;
-      const weatherImpact = Math.random() * 100;
-      
-      const overallRisk = (
-        (100 - engineHealth) * 0.25 +
-        (100 - structuralIntegrity) * 0.2 +
-        (100 - avionicsStatus) * 0.15 +
-        (100 - maintenanceScore) * 0.2 +
-        (100 - pilotExperience) * 0.1 +
-        weatherImpact * 0.1
-      );
-      
-      let riskLevel = 'LOW';
-      let riskColor = '#10B981';
-      if (overallRisk > 70) {
-        riskLevel = 'CRITICAL';
-        riskColor = '#DC2626';
-      } else if (overallRisk > 50) {
-        riskLevel = 'HIGH';
-        riskColor = '#F59E0B';
-      } else if (overallRisk > 30) {
-        riskLevel = 'MEDIUM';
-        riskColor = '#3B82F6';
-      }
-      
-      aircraftData.push({
-        tailNumber,
-        airline: airline.split(' (')[0],
-        aircraftType,
-        status: Math.random() > 0.3 ? 'IN-FLIGHT' : 'GROUNDED',
-        altitude: Math.floor(Math.random() * 40000 + 5000),
-        speed: Math.floor(Math.random() * 500 + 200),
-        heading: Math.floor(Math.random() * 360),
-        lat: (Math.random() - 0.5) * 40 + 20,
-        lng: (Math.random() - 0.5) * 60 + 77,
-        engineHealth,
-        structuralIntegrity,
-        avionicsStatus,
-        maintenanceScore,
-        pilotExperience,
-        weatherImpact,
-        overallRisk,
-        riskLevel,
-        riskColor,
-        flightHours: Math.floor(Math.random() * 50000),
-        lastMaintenance: Math.floor(Math.random() * 30),
-        nextMaintenance: Math.floor(Math.random() * 100 + 50)
-      });
+DATA_CSV = "aviation_dataset.csv"
+ARTIFACTS_DIR = "artifacts"
+INCIDENT_PKL = os.path.join(ARTIFACTS_DIR, "incident_classifier.pkl")
+DELAY_PKL = os.path.join(ARTIFACTS_DIR, "delay_predictor.pkl")
+FEATURES_PKL = os.path.join(ARTIFACTS_DIR, "feature_columns.pkl")
+
+# ---------------------------------------------------------------------
+# Data generator
+# ---------------------------------------------------------------------
+def generate_realistic_aviation_data(n_flights: int = 10000) -> pd.DataFrame:
+    airlines_data = {
+        "Air India": {
+            "code": "AI",
+            "aircraft_types": ["Boeing 787-8", "Boeing 777-300ER", "Airbus A320neo", "Boeing 737-800"],
+            "safety_score": 85,
+        },
+        "IndiGo": {
+            "code": "6E",
+            "aircraft_types": ["Airbus A320neo", "Airbus A321neo", "ATR 72-600"],
+            "safety_score": 92,
+        },
+        "SpiceJet": {
+            "code": "SG",
+            "aircraft_types": ["Boeing 737-800", "Boeing 737 MAX 8", "Bombardier Q400"],
+            "safety_score": 78,
+        },
+        "Vistara": {
+            "code": "UK",
+            "aircraft_types": ["Airbus A320neo", "Airbus A321neo", "Boeing 787-9"],
+            "safety_score": 95,
+        },
+        "GoFirst": {"code": "G8", "aircraft_types": ["Airbus A320neo", "Airbus A321neo"], "safety_score": 82},
+        "AirAsia India": {"code": "I5", "aircraft_types": ["Airbus A320neo"], "safety_score": 88},
     }
-    
-    return { tailNumbers: ['All Aircraft', ...tailNumbers], aircraftData };
-  };
 
-  const { tailNumbers, aircraftData } = generateAircraftData();
-
-  // Filter aircraft based on selections
-  const filteredAircraft = aircraftData.filter(aircraft => {
-    if (selectedAirline !== 'All Airlines' && !selectedAirline.includes(aircraft.airline)) return false;
-    if (selectedTailNumber !== 'All Aircraft' && aircraft.tailNumber !== selectedTailNumber) return false;
-    if (selectedAircraftType !== 'All Types' && aircraft.aircraftType !== selectedAircraftType) return false;
-    return true;
-  });
-
-  // Get available tail numbers for selected airline and type
-  const availableTailNumbers = ['All Aircraft', ...aircraftData
-    .filter(aircraft => {
-      if (selectedAirline !== 'All Airlines' && !selectedAirline.includes(aircraft.airline)) return false;
-      if (selectedAircraftType !== 'All Types' && aircraft.aircraftType !== selectedAircraftType) return false;
-      return true;
-    })
-    .map(aircraft => aircraft.tailNumber)];
-
-  // Initialize 3D Globe
-  useEffect(() => {
-    if (!globeRef.current) return;
-
-    const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(75, 400 / 300, 0.1, 1000);
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-    
-    renderer.setSize(400, 300);
-    renderer.setClearColor(0x000000, 0);
-    globeRef.current.appendChild(renderer.domElement);
-
-    // Create Earth
-    const geometry = new THREE.SphereGeometry(2, 32, 32);
-    const material = new THREE.MeshBasicMaterial({
-      color: 0x2563EB,
-      wireframe: true,
-      transparent: true,
-      opacity: 0.3
-    });
-    const earth = new THREE.Mesh(geometry, material);
-    scene.add(earth);
-
-    // Add aircraft markers
-    filteredAircraft.forEach((aircraft, index) => {
-      const phi = (90 - aircraft.lat) * (Math.PI / 180);
-      const theta = (aircraft.lng + 180) * (Math.PI / 180);
-      
-      const x = 2.1 * Math.sin(phi) * Math.cos(theta);
-      const y = 2.1 * Math.cos(phi);
-      const z = 2.1 * Math.sin(phi) * Math.sin(theta);
-      
-      const aircraftGeometry = new THREE.BoxGeometry(0.1, 0.02, 0.1);
-      const aircraftMaterial = new THREE.MeshBasicMaterial({ 
-        color: aircraft.riskLevel === 'CRITICAL' ? 0xFF0000 : 
-               aircraft.riskLevel === 'HIGH' ? 0xFFAA00 :
-               aircraft.riskLevel === 'MEDIUM' ? 0x0088FF : 0x00FF00
-      });
-      const aircraftMesh = new THREE.Mesh(aircraftGeometry, aircraftMaterial);
-      aircraftMesh.position.set(x, y, z);
-      scene.add(aircraftMesh);
-    });
-
-    camera.position.z = 5;
-    sceneRef.current = scene;
-    rendererRef.current = renderer;
-
-    // Animation loop
-    const animate = () => {
-      animationRef.current = requestAnimationFrame(animate);
-      earth.rotation.y += 0.005;
-      renderer.render(scene, camera);
-    };
-    animate();
-
-    return () => {
-      if (animationRef.current) {
-        cancelAnimationFrame(animationRef.current);
-      }
-      if (globeRef.current && renderer.domElement) {
-        globeRef.current.removeChild(renderer.domElement);
-      }
-    };
-  }, [filteredAircraft]);
-
-  // Update time
-  useEffect(() => {
-    const timer = setInterval(() => {
-      setCurrentTime(new Date());
-    }, 1000);
-    return () => clearInterval(timer);
-  }, []);
-
-  // Update alert level based on aircraft risks
-  useEffect(() => {
-    const criticalCount = filteredAircraft.filter(a => a.riskLevel === 'CRITICAL').length;
-    const highCount = filteredAircraft.filter(a => a.riskLevel === 'HIGH').length;
-    
-    if (criticalCount > 0) {
-      setAlertLevel('CRITICAL');
-    } else if (highCount > 2) {
-      setAlertLevel('HIGH');
-    } else if (highCount > 0) {
-      setAlertLevel('ELEVATED');
-    } else {
-      setAlertLevel('NORMAL');
+    airports = {
+        "DEL": {"name": "Delhi", "lat": 28.5562, "lng": 77.1000, "traffic": "Very High"},
+        "BOM": {"name": "Mumbai", "lat": 19.0896, "lng": 72.8656, "traffic": "Very High"},
+        "BLR": {"name": "Bengaluru", "lat": 13.1986, "lng": 77.7066, "traffic": "High"},
+        "MAA": {"name": "Chennai", "lat": 12.9941, "lng": 80.1709, "traffic": "High"},
+        "CCU": {"name": "Kolkata", "lat": 22.6547, "lng": 88.4467, "traffic": "High"},
+        "HYD": {"name": "Hyderabad", "lat": 17.2403, "lng": 78.4294, "traffic": "High"},
+        "COK": {"name": "Kochi", "lat": 10.1520, "lng": 76.4019, "traffic": "Medium"},
+        "AMD": {"name": "Ahmedabad", "lat": 23.0726, "lng": 72.6263, "traffic": "Medium"},
+        "PNQ": {"name": "Pune", "lat": 18.5822, "lng": 73.9197, "traffic": "Medium"},
+        "JAI": {"name": "Jaipur", "lat": 26.8247, "lng": 75.8127, "traffic": "Medium"},
+        # Extra airports you asked to include earlier:
+        "GOI": {"name": "Goa", "lat": 15.3800, "lng": 73.8314, "traffic": "Medium"},
+        "TRV": {"name": "Trivandrum", "lat": 8.4821, "lng": 76.9209, "traffic": "Medium"},
+        "IXB": {"name": "Bagdogra", "lat": 26.6812, "lng": 88.3286, "traffic": "Low"},
+        "IXC": {"name": "Chandigarh", "lat": 30.6735, "lng": 76.7885, "traffic": "Low"},
+        "VNS": {"name": "Varanasi", "lat": 25.4524, "lng": 82.8593, "traffic": "Low"},
+        "SXR": {"name": "Srinagar", "lat": 33.9871, "lng": 74.7743, "traffic": "Low"},
     }
-  }, [filteredAircraft]);
 
-  const getSelectedAircraftData = () => {
-    if (selectedTailNumber === 'All Aircraft') return null;
-    return aircraftData.find(aircraft => aircraft.tailNumber === selectedTailNumber);
-  };
+    def reg() -> str:
+        # VT-XXX registrations
+        return "VT-" + "".join(np.random.choice(list("ABCDEFGHIJKLMNOPQRSTUVWXYZ"), 3))
 
-  const selectedAircraftData = getSelectedAircraftData();
+    flights = []
+    traffic_mult = {"Very High": 1.5, "High": 1.2, "Medium": 1.0, "Low": 0.8}
 
-  return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-900 via-blue-900 to-black text-white overflow-hidden">
-      {/* Header */}
-      <div className="bg-black bg-opacity-50 backdrop-blur-sm border-b border-blue-500/30 p-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center space-x-3">
-            <Eye className="w-8 h-8 text-blue-400" />
-            <h1 className="text-3xl font-bold bg-gradient-to-r from-blue-400 to-cyan-400 bg-clip-text text-transparent">
-              GUARDIAN EYE
-            </h1>
-            <span className="text-sm text-gray-400">Aviation Operations Center</span>
-          </div>
-          
-          <div className="flex items-center space-x-6">
-            <div className="text-right">
-              <div className="text-lg font-mono">{currentTime.toLocaleTimeString()}</div>
-              <div className="text-sm text-gray-400">{currentTime.toLocaleDateString()}</div>
-            </div>
-            
-            <div className={`px-4 py-2 rounded-lg font-bold ${
-              alertLevel === 'CRITICAL' ? 'bg-red-600 text-white animate-pulse' :
-              alertLevel === 'HIGH' ? 'bg-orange-600 text-white' :
-              alertLevel === 'ELEVATED' ? 'bg-yellow-600 text-black' :
-              'bg-green-600 text-white'
-            }`}>
-              ALERT: {alertLevel}
-            </div>
-          </div>
-        </div>
-      </div>
+    for i in range(n_flights):
+        airline = np.random.choice(list(airlines_data.keys()))
+        info = airlines_data[airline]
+        a_type = np.random.choice(info["aircraft_types"])
+        tail = reg()
 
-      <div className="grid grid-cols-12 gap-4 p-4 h-screen">
-        {/* Control Panel */}
-        <div className="col-span-3 space-y-4">
-          <div className="bg-black bg-opacity-40 backdrop-blur-sm rounded-lg border border-blue-500/30 p-4">
-            <h3 className="text-lg font-bold mb-4 flex items-center">
-              <Navigation className="w-5 h-5 mr-2 text-blue-400" />
-              Aircraft Selection
-            </h3>
-            
-            <div className="space-y-3">
-              <div>
-                <label className="block text-sm font-medium mb-1 text-gray-300">Airline</label>
-                <select 
-                  value={selectedAirline}
-                  onChange={(e) => {
-                    setSelectedAirline(e.target.value);
-                    setSelectedTailNumber('All Aircraft');
-                  }}
-                  className="w-full bg-gray-800 border border-gray-600 rounded px-3 py-2 text-white focus:border-blue-500 focus:outline-none"
-                >
-                  {airlines.map(airline => (
-                    <option key={airline} value={airline}>{airline}</option>
-                  ))}
-                </select>
-              </div>
+        origin = np.random.choice(list(airports.keys()))
+        dest_choices = [a for a in airports.keys() if a != origin]
+        dest = np.random.choice(dest_choices)
 
-              <div>
-                <label className="block text-sm font-medium mb-1 text-gray-300">Aircraft Type</label>
-                <select 
-                  value={selectedAircraftType}
-                  onChange={(e) => {
-                    setSelectedAircraftType(e.target.value);
-                    setSelectedTailNumber('All Aircraft');
-                  }}
-                  className="w-full bg-gray-800 border border-gray-600 rounded px-3 py-2 text-white focus:border-blue-500 focus:outline-none"
-                >
-                  {aircraftTypes.map(type => (
-                    <option key={type} value={type}>{type}</option>
-                  ))}
-                </select>
-              </div>
+        base_date = datetime(2024, 1, 1) + timedelta(days=np.random.randint(0, 366))
+        sched_dep = base_date + timedelta(hours=np.random.randint(5, 23), minutes=int(np.random.choice([0, 15, 30, 45])))
 
-              <div>
-                <label className="block text-sm font-medium mb-1 text-gray-300">Tail Number</label>
-                <select 
-                  value={selectedTailNumber}
-                  onChange={(e) => setSelectedTailNumber(e.target.value)}
-                  className="w-full bg-gray-800 border border-gray-600 rounded px-3 py-2 text-white focus:border-blue-500 focus:outline-none"
-                >
-                  {availableTailNumbers.map(tail => (
-                    <option key={tail} value={tail}>{tail}</option>
-                  ))}
-                </select>
-              </div>
-            </div>
-          </div>
+        # Condition scores
+        age = np.random.uniform(1, 20)
+        hours = np.random.uniform(5_000, 80_000)
+        cycles = hours / 1.5
+        last_maint_days = np.random.uniform(1, 180)
 
-          {/* General Fleet Status */}
-          <div className="bg-black bg-opacity-40 backdrop-blur-sm rounded-lg border border-blue-500/30 p-4">
-            <h3 className="text-lg font-bold mb-4 flex items-center">
-              <Radar className="w-5 h-5 mr-2 text-green-400" />
-              Fleet Overview
-            </h3>
-            
-            <div className="grid grid-cols-2 gap-3">
-              <div className="bg-gray-800 rounded p-3 text-center">
-                <div className="text-2xl font-bold text-blue-400">{filteredAircraft.length}</div>
-                <div className="text-xs text-gray-400">Total Aircraft</div>
-              </div>
-              
-              <div className="bg-gray-800 rounded p-3 text-center">
-                <div className="text-2xl font-bold text-green-400">
-                  {filteredAircraft.filter(a => a.status === 'IN-FLIGHT').length}
-                </div>
-                <div className="text-xs text-gray-400">In Flight</div>
-              </div>
-              
-              <div className="bg-gray-800 rounded p-3 text-center">
-                <div className="text-2xl font-bold text-red-400">
-                  {filteredAircraft.filter(a => a.riskLevel === 'CRITICAL').length}
-                </div>
-                <div className="text-xs text-gray-400">Critical Risk</div>
-              </div>
-              
-              <div className="bg-gray-800 rounded p-3 text-center">
-                <div className="text-2xl font-bold text-orange-400">
-                  {filteredAircraft.filter(a => a.riskLevel === 'HIGH').length}
-                </div>
-                <div className="text-xs text-gray-400">High Risk</div>
-              </div>
-            </div>
-          </div>
-        </div>
+        # Weather (seasonal)
+        monsoon = 1.5 if sched_dep.month in [6, 7, 8, 9] else 1.0
+        winter_fog = 1.3 if (sched_dep.month in [12, 1, 2] and origin in ["DEL", "JAI"]) else 1.0
+        weather_score = min(1.0, np.random.uniform(0.2, 1.0) * monsoon * winter_fog)
 
-        {/* Main Display */}
-        <div className="col-span-6 space-y-4">
-          {/* 3D Globe */}
-          <div className="bg-black bg-opacity-40 backdrop-blur-sm rounded-lg border border-blue-500/30 p-4">
-            <h3 className="text-lg font-bold mb-4 flex items-center">
-              <Globe className="w-5 h-5 mr-2 text-blue-400" />
-              Global Aircraft Tracking
-            </h3>
-            <div ref={globeRef} className="w-full flex justify-center"></div>
-          </div>
+        engine = max(0, 100 - age * 2 - np.random.uniform(0, 20))
+        structure = max(0, 100 - age * 1.5 - cycles / 1000 - np.random.uniform(0, 15))
+        avionics = max(0, 100 - age * 1 - np.random.uniform(0, 10))
+        maint = max(0, 100 - last_maint_days / 2 - np.random.uniform(0, 20))
 
-          {/* Aircraft List */}
-          <div className="bg-black bg-opacity-40 backdrop-blur-sm rounded-lg border border-blue-500/30 p-4">
-            <h3 className="text-lg font-bold mb-4 flex items-center">
-              <Activity className="w-5 h-5 mr-2 text-green-400" />
-              Active Aircraft Monitor
-            </h3>
-            
-            <div className="max-h-64 overflow-y-auto space-y-2">
-              {filteredAircraft.map((aircraft, index) => (
-                <div 
-                  key={index}
-                  className={`p-3 rounded border-l-4 cursor-pointer transition-all hover:bg-gray-700 ${
-                    aircraft.riskLevel === 'CRITICAL' ? 'border-red-500 bg-red-900/20' :
-                    aircraft.riskLevel === 'HIGH' ? 'border-orange-500 bg-orange-900/20' :
-                    aircraft.riskLevel === 'MEDIUM' ? 'border-blue-500 bg-blue-900/20' :
-                    'border-green-500 bg-green-900/20'
-                  }`}
-                  onClick={() => setSelectedTailNumber(aircraft.tailNumber)}
-                >
-                  <div className="flex justify-between items-center">
-                    <div>
-                      <div className="font-bold">{aircraft.tailNumber}</div>
-                      <div className="text-sm text-gray-400">{aircraft.airline} • {aircraft.aircraftType}</div>
-                    </div>
-                    <div className="text-right">
-                      <div className={`font-bold ${aircraft.riskColor}`}>{aircraft.riskLevel}</div>
-                      <div className="text-sm text-gray-400">{aircraft.status}</div>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
+        pilot_exp_hrs = np.random.uniform(500, 15000)
+        pilot_exp = min(100, pilot_exp_hrs / 150)
+        crew_rest = np.random.uniform(8, 24)
+        crew_fatigue = max(0, min(100, crew_rest * 4))
 
-        {/* Aircraft Details Panel */}
-        <div className="col-span-3 space-y-4">
-          {selectedAircraftData ? (
-            <>
-              {/* Selected Aircraft Info */}
-              <div className="bg-black bg-opacity-40 backdrop-blur-sm rounded-lg border border-blue-500/30 p-4">
-                <h3 className="text-lg font-bold mb-4 flex items-center">
-                  <Plane className="w-5 h-5 mr-2 text-blue-400" />
-                  {selectedAircraftData.tailNumber}
-                </h3>
-                
-                <div className="space-y-3">
-                  <div className="bg-gray-800 rounded p-3">
-                    <div className="text-sm text-gray-400">Airline</div>
-                    <div className="font-bold">{selectedAircraftData.airline}</div>
-                  </div>
-                  
-                  <div className="bg-gray-800 rounded p-3">
-                    <div className="text-sm text-gray-400">Aircraft Type</div>
-                    <div className="font-bold">{selectedAircraftData.aircraftType}</div>
-                  </div>
-                  
-                  <div className="bg-gray-800 rounded p-3">
-                    <div className="text-sm text-gray-400">Status</div>
-                    <div className="font-bold">{selectedAircraftData.status}</div>
-                  </div>
-                  
-                  {selectedAircraftData.status === 'IN-FLIGHT' && (
-                    <>
-                      <div className="grid grid-cols-2 gap-2">
-                        <div className="bg-gray-800 rounded p-2 text-center">
-                          <div className="text-lg font-bold text-blue-400">{selectedAircraftData.altitude.toLocaleString()}</div>
-                          <div className="text-xs text-gray-400">Altitude (ft)</div>
-                        </div>
-                        <div className="bg-gray-800 rounded p-2 text-center">
-                          <div className="text-lg font-bold text-green-400">{selectedAircraftData.speed}</div>
-                          <div className="text-xs text-gray-400">Speed (kt)</div>
-                        </div>
-                      </div>
-                    </>
-                  )}
-                </div>
-              </div>
+        atc_prob = (traffic_mult[airports[origin]["traffic"]] + traffic_mult[airports[dest]["traffic"]]) / 2
+        atc_score = max(0, 100 - atc_prob * 30 - np.random.uniform(0, 20))
 
-              {/* Aircraft-Specific Risk Assessment */}
-              <div className="bg-black bg-opacity-40 backdrop-blur-sm rounded-lg border border-blue-500/30 p-4">
-                <h3 className="text-lg font-bold mb-4 flex items-center">
-                  <AlertTriangle className="w-5 h-5 mr-2 text-orange-400" />
-                  Risk Assessment
-                </h3>
-                
-                <div className={`mb-4 p-3 rounded font-bold text-center ${
-                  selectedAircraftData.riskLevel === 'CRITICAL' ? 'bg-red-600' :
-                  selectedAircraftData.riskLevel === 'HIGH' ? 'bg-orange-600' :
-                  selectedAircraftData.riskLevel === 'MEDIUM' ? 'bg-blue-600' :
-                  'bg-green-600'
-                }`}>
-                  RISK LEVEL: {selectedAircraftData.riskLevel}
-                </div>
-                
-                <div className="space-y-3">
-                  <div>
-                    <div className="flex justify-between text-sm mb-1">
-                      <span>Engine Health</span>
-                      <span>{selectedAircraftData.engineHealth.toFixed(1)}%</span>
-                    </div>
-                    <div className="w-full bg-gray-700 rounded-full h-2">
-                      <div 
-                        className={`h-2 rounded-full ${selectedAircraftData.engineHealth > 70 ? 'bg-green-500' : selectedAircraftData.engineHealth > 40 ? 'bg-orange-500' : 'bg-red-500'}`}
-                        style={{ width: `${selectedAircraftData.engineHealth}%` }}
-                      ></div>
-                    </div>
-                  </div>
-                  
-                  <div>
-                    <div className="flex justify-between text-sm mb-1">
-                      <span>Structural Integrity</span>
-                      <span>{selectedAircraftData.structuralIntegrity.toFixed(1)}%</span>
-                    </div>
-                    <div className="w-full bg-gray-700 rounded-full h-2">
-                      <div 
-                        className={`h-2 rounded-full ${selectedAircraftData.structuralIntegrity > 70 ? 'bg-green-500' : selectedAircraftData.structuralIntegrity > 40 ? 'bg-orange-500' : 'bg-red-500'}`}
-                        style={{ width: `${selectedAircraftData.structuralIntegrity}%` }}
-                      ></div>
-                    </div>
-                  </div>
-                  
-                  <div>
-                    <div className="flex justify-between text-sm mb-1">
-                      <span>Avionics Status</span>
-                      <span>{selectedAircraftData.avionicsStatus.toFixed(1)}%</span>
-                    </div>
-                    <div className="w-full bg-gray-700 rounded-full h-2">
-                      <div 
-                        className={`h-2 rounded-full ${selectedAircraftData.avionicsStatus > 70 ? 'bg-green-500' : selectedAircraftData.avionicsStatus > 40 ? 'bg-orange-500' : 'bg-red-500'}`}
-                        style={{ width: `${selectedAircraftData.avionicsStatus}%` }}
-                      ></div>
-                    </div>
-                  </div>
-                  
-                  <div>
-                    <div className="flex justify-between text-sm mb-1">
-                      <span>Maintenance Score</span>
-                      <span>{selectedAircraftData.maintenanceScore.toFixed(1)}%</span>
-                    </div>
-                    <div className="w-full bg-gray-700 rounded-full h-2">
-                      <div 
-                        className={`h-2 rounded-full ${selectedAircraftData.maintenanceScore > 70 ? 'bg-green-500' : selectedAircraftData.maintenanceScore > 40 ? 'bg-orange-500' : 'bg-red-500'}`}
-                        style={{ width: `${selectedAircraftData.maintenanceScore}%` }}
-                      ></div>
-                    </div>
-                  </div>
-                </div>
-                
-                <div className="mt-4 pt-4 border-t border-gray-600">
-                  <div className="text-sm text-gray-400 space-y-1">
-                    <div>Flight Hours: {selectedAircraftData.flightHours.toLocaleString()}</div>
-                    <div>Last Maintenance: {selectedAircraftData.lastMaintenance} days ago</div>
-                    <div>Next Maintenance: {selectedAircraftData.nextMaintenance} hours</div>
-                  </div>
-                </div>
-              </div>
-            </>
-          ) : (
-            <div className="bg-black bg-opacity-40 backdrop-blur-sm rounded-lg border border-blue-500/30 p-4">
-              <h3 className="text-lg font-bold mb-4 flex items-center">
-                <Gauge className="w-5 h-5 mr-2 text-gray-400" />
-                Aircraft Details
-              </h3>
-              <div className="text-center text-gray-400 py-8">
-                Select a specific aircraft to view detailed risk assessment
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-};
+        tech_risk = (100 - engine) * 0.4 + (100 - structure) * 0.3 + (100 - avionics) * 0.2 + (100 - maint) * 0.1
+        human_risk = (100 - pilot_exp) * 0.7 + (100 - crew_fatigue) * 0.3
+        env_risk = weather_score * 100 * 0.7 + (100 - atc_score) * 0.3
 
-export default GuardianEyeDashboard;
+        incident_prob = (tech_risk * 0.5 + human_risk * 0.3 + env_risk * 0.2) / 100
+        incident_prob *= (100 - info["safety_score"]) / 100
+        incident_prob = float(np.clip(incident_prob, 0, 1))
+
+        if incident_prob > 0.7:
+            risk_level = "CRITICAL"
+        elif incident_prob > 0.5:
+            risk_level = "HIGH"
+        elif incident_prob > 0.3:
+            risk_level = "MEDIUM"
+        else:
+            risk_level = "LOW"
+
+        base_delay = np.random.poisson(8)
+        weather_delay = np.random.poisson(30) if weather_score > 0.7 else (np.random.poisson(15) if weather_score > 0.5 else 0)
+        tech_delay = np.random.poisson(45) if (engine < 70 or maint < 60) else (np.random.poisson(20) if engine < 85 else 0)
+        atc_delay = np.random.poisson(25) if atc_score < 70 else (np.random.poisson(10) if atc_score < 85 else 0)
+        total_delay = int(base_delay + weather_delay + tech_delay + atc_delay)
+
+        status = "DELAYED" if total_delay > 60 else ("IN-FLIGHT" if np.random.random() > 0.7 else ("COMPLETED" if np.random.random() > 0.5 else "SCHEDULED"))
+        actual_dep = sched_dep + timedelta(minutes=total_delay)
+
+        flights.append(
+            {
+                "flight_id": f'{info["code"]}{1000 + i}',
+                "airline": airline,
+                "airline_code": info["code"],
+                "aircraft_type": a_type,
+                "tail_number": tail,
+                "origin": origin,
+                "destination": dest,
+                "origin_name": airports[origin]["name"],
+                "destination_name": airports[dest]["name"],
+                "scheduled_departure": sched_dep,
+                "actual_departure": actual_dep,
+                "delay_minutes": total_delay,
+                "status": status,
+                "aircraft_age_years": age,
+                "flight_hours": hours,
+                "cycles": cycles,
+                "last_maintenance_days": last_maint_days,
+                "engine_health": engine,
+                "structural_integrity": structure,
+                "avionics_status": avionics,
+                "maintenance_score": maint,
+                "pilot_experience": pilot_exp,
+                "crew_fatigue_factor": crew_fatigue,
+                "weather_score": weather_score,
+                "atc_score": atc_score,
+                "technical_risk": tech_risk,
+                "human_risk": human_risk,
+                "environmental_risk": env_risk,
+                "incident_probability": incident_prob,
+                "risk_level": risk_level,
+                "origin_lat": airports[origin]["lat"],
+                "origin_lng": airports[origin]["lng"],
+                "dest_lat": airports[dest]["lat"],
+                "dest_lng": airports[dest]["lng"],
+                # pseudo in-flight position along great-circle-ish straight line
+                "current_lat": airports[origin]["lat"] + (airports[dest]["lat"] - airports[origin]["lat"]) * np.random.random(),
+                "current_lng": airports[origin]["lng"] + (airports[dest]["lng"] - airports[origin]["lng"]) * np.random.random(),
+                "altitude": int(np.random.randint(25000, 42000) if status == "IN-FLIGHT" else 0),
+                "speed": int(np.random.randint(400, 550) if status == "IN-FLIGHT" else 0),
+                "heading": int(np.random.randint(0, 360)),
+                "weather_delay": int(weather_delay),
+                "technical_delay": int(tech_delay),
+                "atc_delay": int(atc_delay),
+                "base_delay": int(base_delay),
+            }
+        )
+
+    df = pd.DataFrame(flights)
+    return df
+
+
+# ---------------------------------------------------------------------
+# ML training & loading
+# ---------------------------------------------------------------------
+FEATURE_COLUMNS = [
+    "aircraft_age_years",
+    "flight_hours",
+    "cycles",
+    "last_maintenance_days",
+    "engine_health",
+    "structural_integrity",
+    "avionics_status",
+    "maintenance_score",
+    "pilot_experience",
+    "crew_fatigue_factor",
+    "weather_score",
+    "atc_score",
+]
+
+@st.cache_data(show_spinner=False)
+def ensure_data_and_models():
+    os.makedirs(ARTIFACTS_DIR, exist_ok=True)
+
+    if not os.path.exists(DATA_CSV):
+        df = generate_realistic_aviation_data(8000)
+        df.to_csv(DATA_CSV, index=False)
+    else:
+        df = pd.read_csv(DATA_CSV, parse_dates=["scheduled_departure", "actual_departure"])
+
+    # Train models if missing
+    need_train = not (os.path.exists(INCIDENT_PKL) and os.path.exists(DELAY_PKL) and os.path.exists(FEATURES_PKL))
+    if need_train:
+        X = df[FEATURE_COLUMNS]
+        y_incident = (df["incident_probability"] > 0.5).astype(int)
+        y_delay = df["delay_minutes"]
+
+        X_train, X_test, y_inc_train, y_inc_test = train_test_split(X, y_incident, test_size=0.2, random_state=42)
+        _, _, y_d_train, y_d_test = train_test_split(X, y_delay, test_size=0.2, random_state=42)
+
+        clf = RandomForestClassifier(n_estimators=200, random_state=42)
+        clf.fit(X_train, y_inc_train)
+        reg = RandomForestRegressor(n_estimators=200, random_state=42)
+        reg.fit(X_train, y_d_train)
+
+        with open(INCIDENT_PKL, "wb") as f:
+            pickle.dump(clf, f)
+        with open(DELAY_PKL, "wb") as f:
+            pickle.dump(reg, f)
+        with open(FEATURES_PKL, "wb") as f:
+            pickle.dump(FEATURE_COLUMNS, f)
+
+    # Load models
+    with open(INCIDENT_PKL, "rb") as f:
+        clf = pickle.load(f)
+    with open(DELAY_PKL, "rb") as f:
+        reg = pickle.load(f)
+
+    return df, clf, reg
+
+# ---------------------------------------------------------------------
+# 3D Globe (Plotly)
+# ---------------------------------------------------------------------
+def globe_with_aircraft(df: pd.DataFrame) -> go.Figure:
+    # Sphere mesh
+    u = np.linspace(0, 2 * np.pi, 50)
+    v = np.linspace(0, np.pi, 50)
+    x = 1.0 * np.outer(np.cos(u), np.sin(v))
+    y = 1.0 * np.outer(np.sin(u), np.sin(v))
+    z = 1.0 * np.outer(np.ones_like(u), np.cos(v))
+
+    # Scale aircraft lat/lng to sphere
+    def latlng_to_xyz(lat, lng, r=1.02):
+        lat = np.deg2rad(lat)
+        lng = np.deg2rad(lng)
+        X = r * np.cos(lat) * np.cos(lng)
+        Y = r * np.cos(lat) * np.sin(lng)
+        Z = r * np.sin(lat)
+        return X, Y, Z
+
+    # Marker colors by risk
+    color_map = {"CRITICAL": "red", "HIGH": "orange", "MEDIUM": "dodgerblue", "LOW": "limegreen"}
+    lats = df["current_lat"].values
+    lngs = df["current_lng"].values
+    colors = df["risk_level"].map(color_map).values
+
+    Xp, Yp, Zp = latlng_to_xyz(lats, lngs)
+
+    fig = go.Figure(
+        data=[
+            go.Surface(x=x, y=y, z=z, opacity=0.25, showscale=False, colorscale="Blues"),
+            go.Scatter3d(
+                x=Xp,
+                y=Yp,
+                z=Zp,
+                mode="markers",
+                marker=dict(size=4, color=colors),
+                text=df.apply(lambda r: f"{r['tail_number']} • {r['airline']} • {r['aircraft_type']}", axis=1),
+                hovertemplate="%{text}<extra></extra>",
+            ),
+        ]
+    )
+    fig.update_layout(
+        scene=dict(
+            xaxis=dict(visible=False),
+            yaxis=dict(visible=False),
+            zaxis=dict(visible=False),
+            aspectmode="data",
+        ),
+        margin=dict(l=0, r=0, t=0, b=0),
+        paper_bgcolor="rgba(0,0,0,0)",
+    )
+    return fig
+
+# ---------------------------------------------------------------------
+# Prediction helpers
+# ---------------------------------------------------------------------
+def run_predictions(df_row: pd.Series, clf, reg) -> dict:
+    X = df_row[FEATURE_COLUMNS].values.reshape(1, -1)
+    inc_proba = float(clf.predict_proba(X)[0, 1])
+    delay_pred = float(reg.predict(X)[0])
+    return {"incident_probability": inc_proba, "predicted_delay_minutes": delay_pred}
+
+# ---------------------------------------------------------------------
+# UI
+# ---------------------------------------------------------------------
+def app():
+    st.markdown(
+        """
+        <style>
+        .block-container {padding-top: 1rem;}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("## 🛡️ Guardian Eye — Aviation Operations Center")
+
+    df, clf, reg = ensure_data_and_models()
+
+    # Sidebar filters
+    st.sidebar.header("🎛️ Aircraft Selection")
+    airlines = ["All Airlines"] + sorted(df["airline"].unique().tolist())
+    sel_airline = st.sidebar.selectbox("Airline", airlines)
+
+    sub = df.copy()
+    if sel_airline != "All Airlines":
+        sub = sub[sub["airline"] == sel_airline]
+
+    types = ["All Types"] + sorted(sub["aircraft_type"].unique().tolist())
+    sel_type = st.sidebar.selectbox("Aircraft Type", types)
+    if sel_type != "All Types":
+        sub = sub[sub["aircraft_type"] == sel_type]
+
+    tails = ["All Aircraft"] + sorted(sub["tail_number"].unique().tolist())
+    sel_tail = st.sidebar.selectbox("Tail Number", tails)
+
+    # Top KPI row
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        st.metric("Total Aircraft", len(sub))
+    with k2:
+        st.metric("In Flight", int((sub["status"] == "IN-FLIGHT").sum()))
+    with k3:
+        st.metric("Critical Risk", int((sub["risk_level"] == "CRITICAL").sum()))
+    with k4:
+        st.metric("Avg Incident Risk", f"{sub['incident_probability'].mean() * 100:.1f}%")
+
+    # Layout: globe | details
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        st.subheader("🌐 Global Aircraft Tracking")
+        fig = globe_with_aircraft(sub.sample(min(300, len(sub))) if len(sub) > 300 else sub)
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+        st.subheader("📡 Active Aircraft Monitor")
+        show_cols = ["tail_number", "airline", "aircraft_type", "status", "risk_level", "incident_probability", "delay_minutes"]
+        table = sub.sort_values("incident_probability", ascending=False)[show_cols].copy()
+        table["incident_probability"] = (table["incident_probability"] * 100).round(1)
+        table.rename(columns={"incident_probability": "Risk %", "delay_minutes": "Delay (min)", "tail_number": "Tail"}, inplace=True)
+        st.dataframe(table.head(50), use_container_width=True, height=420)
+
+    with c2:
+        st.subheader("✈️ Aircraft Details")
+        if sel_tail != "All Aircraft" and sel_tail in sub["tail_number"].values:
+            row = sub[sub["tail_number"] == sel_tail].iloc[0]
+            preds = run_predictions(row, clf, reg)
+
+            st.markdown(f"**Tail:** {row['tail_number']}  \n**Airline:** {row['airline']}  \n**Type:** {row['aircraft_type']}  \n**Status:** {row['status']}")
+            st.markdown("---")
+            st.metric("Predicted Delay (min)", f"{preds['predicted_delay_minutes']:.0f}")
+            st.metric("Incident Probability", f"{preds['incident_probability']*100:.1f}%")
+            st.markdown("---")
+
+            st.markdown("**Health Metrics**")
+            m1, m2 = st.columns(2)
+            with m1:
+                st.progress(int(row["engine_health"]), text=f"Engine Health {row['engine_health']:.1f}%")
+                st.progress(int(row["structural_integrity"]), text=f"Structural {row['structural_integrity']:.1f}%")
+            with m2:
+                st.progress(int(row["avionics_status"]), text=f"Avionics {row['avionics_status']:.1f}%")
+                st.progress(int(row["maintenance_score"]), text=f"Maintenance {row['maintenance_score']:.1f}%")
+
+            st.markdown("---")
+            st.markdown("**Risk Breakdown**")
+            rb = pd.DataFrame(
+                {
+                    "Risk Factor": ["Technical", "Human", "Environmental"],
+                    "Score": [row["technical_risk"], row["human_risk"], row["environmental_risk"]],
+                }
+            )
+            st.bar_chart(rb.set_index("Risk Factor"))
+        else:
+            st.info("Select a specific tail number to view detailed risk & predictions.")
+
+    # Bottom — quick model report toggle
+    with st.expander("Model diagnostics (quick view)"):
+        X = df[FEATURE_COLUMNS]
+        y_incident = (df["incident_probability"] > 0.5).astype(int)
+        X_train, X_test, y_inc_train, y_inc_test = train_test_split(X, y_incident, test_size=0.2, random_state=42)
+        y_pred = clf.predict(X_test)
+        rep = classification_report(y_inc_test, y_pred, output_dict=False, zero_division=0)
+        st.text(rep)
+
+# ---------------------------------------------------------------------
+# Run app
+# ---------------------------------------------------------------------
+if __name__ == "__main__":
+    app()
