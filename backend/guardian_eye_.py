@@ -10,6 +10,16 @@ from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, mean_squared_error
 import streamlit.components.v1 as components
+✅ API endpoint for frontend fetch
+# ---------------------------------------------------------------------
+if "data" in st.query_params and st.query_params["data"] == "flights":
+    if os.path.exists("aviation_dataset.csv"):
+        df = pd.read_csv("aviation_dataset.csv")
+    else:
+        from guardian_eye import generate_realistic_aviation_data  # fallback
+        df = generate_realistic_aviation_data(5000)
+    st.json(df.to_dict(orient="records"))
+    st.stop()
 
 np.random.seed(42)
 
@@ -516,4 +526,5 @@ with st.expander("ℹ️ What counts as the reason for delay & risk?"):
 - **Risk reason** = largest component among `Technical condition`, `Human factors (crew)`, `Environment (weather/ATC)`.
 - The globe uses a **dark earth texture + glow** for a clear, modern ops-center look.
 """)
+
 
