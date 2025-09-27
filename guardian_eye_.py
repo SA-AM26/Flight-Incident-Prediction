@@ -58,16 +58,6 @@ AIRLINES = {
         'types': ['Boeing 737-800','Boeing 737 MAX 8','Bombardier Q400'],
         'safety_score': 78
     },
-    'Vistara': {
-        'code': 'UK',
-        'types': ['Airbus A320neo','Airbus A321neo','Boeing 787-9'],
-        'safety_score': 95
-    },
-    'GoFirst': {
-        'code': 'G8',
-        'types': ['Airbus A320neo','Airbus A321neo'],
-        'safety_score': 82
-    },
     'AirAsia India': {
         'code': 'I5',
         'types': ['Airbus A320neo'],
@@ -101,12 +91,10 @@ def generate_realistic_aviation_data(n_days: int = 30) -> pd.DataFrame:
 
     # Fixed domestic routes per airline (simple, realistic)
     airlines_routes = {
-        "Air India":     [("DEL","BOM"),("BOM","DEL"),("DEL","BLR"),("BLR","DEL")],
-        "IndiGo":        [("DEL","MAA"),("MAA","DEL"),("BLR","DEL"),("DEL","BLR")],
-        "SpiceJet":      [("DEL","COK"),("COK","DEL"),("BOM","HYD"),("HYD","BOM")],
-        "Vistara":       [("DEL","BOM"),("BOM","DEL"),("MAA","BLR"),("BLR","MAA")],
-        "GoFirst":       [("DEL","PNQ"),("PNQ","DEL"),("BOM","AMD"),("AMD","BOM")],
-        "AirAsia India": [("BLR","DEL"),("DEL","BLR"),("MAA","CCU"),("CCU","MAA")]
+        "Air India":     [("DEL","BOM"),("BOM","DEL"),("DEL","BLR"),("BLR","DEL"),("DEL","MAA"),("MAA","DEL")],
+        "IndiGo":        [("DEL","MAA"),("MAA","DEL"),("BLR","DEL"),("DEL","BLR"),("BOM","BLR"),("BLR","BOM")],
+        "SpiceJet":      [("DEL","COK"),("COK","DEL"),("BOM","HYD"),("HYD","BOM"),("DEL","PNQ"),("PNQ","DEL")],
+        "AirAsia India": [("BLR","DEL"),("DEL","BLR"),("MAA","CCU"),("CCU","MAA"),("BOM","AMD"),("AMD","BOM")]
     }
 
     flights = []
@@ -591,6 +579,182 @@ def create_guardian_eye_streamlit():
                         st.write(f"{color} {risk}: {count}")
             
             with col_globe:
+                # Enhanced 3D Globe
+                fig = go.Figure()
+
+                # Add Earth sphere as base
+                u = np.linspace(0, 2 * np.pi, 50)
+                v = np.linspace(0, np.pi, 50)
+                x_sphere = np.outer(np.cos(u), np.sin(v))
+                y_sphere = np.outer(np.sin(u), np.sin(v))
+                z_sphere = np.outer(np.ones(np.size(u)), np.cos(v))
+                
+                fig.add_trace(go.Surface(
+                    x=x_sphere, y=y_sphere, z=z_sphere,
+                    colorscale='Earth',
+                    showscale=False,
+                    opacity=0.8,
+                    name="Earth"
+                ))
+
+                # Convert lat/lng to 3D coordinates for aircraft positions
+                def lat_lng_to_3d(lat, lng, radius=1.02):
+                    lat_rad = np.radians(lat)
+                    lng_rad = np.radians(lng)
+                    x = radius * np.cos(lat_rad) * np.cos(lng_rad)
+                    y = radius * np.cos(lat_rad) * np.sin(lng_rad)
+                    z = radius * np.sin(lat_rad)
+                    return x, y, z
+
+                # Aircraft positions on the globe
+                if all(col in tmp.columns for col in ['current_lat', 'current_lng', 'risk_level']):
+                    aircraft_x, aircraft_y, aircraft_z = [], [], []
+                    aircraft_colors, aircraft_text = [], []
+                    
+                    risk_color_map = {
+                        "CRITICAL": "#DC2626",
+                        "HIGH": "#F59E0B", 
+                        "MEDIUM": "#3B82F6",
+                        "LOW": "#10B981"
+                    }
+                    
+                    for _, r in tmp.iterrows():
+                        if pd.notna(r['current_lat']) and pd.notna(r['current_lng']):
+                            x, y, z = lat_lng_to_3d(r['current_lat'], r['current_lng'])
+                            aircraft_x.append(x)
+                            aircraft_y.append(y) 
+                            aircraft_z.append(z)
+                            
+                            color = risk_color_map.get(r.get('risk_level', 'LOW'), "#6B7280")
+                            aircraft_colors.append(color)
+                            
+                            text = f"✈️ {r.get('flight_id', 'Unknown')}<br>"
+                            text += f"🏢 {r.get('airline', 'Unknown')}<br>"
+                            text += f"📍 {r.get('origin', '')} → {r.get('destination', '')}<br>"
+                            text += f"⚠️ Risk: {r.get('risk_level', 'Unknown')}<br>"
+                            text += f"⏱️ Delay: {r.get('delay_minutes', 0)} min<br>"
+                            text += f"✈️ Type: {r.get('aircraft_type', 'Unknown')}"
+                            aircraft_text.append(text)
+
+                    # Add aircraft markers
+                    fig.add_trace(go.Scatter3d(
+                        x=aircraft_x, y=aircraft_y, z=aircraft_z,
+                        mode='markers',
+                        marker=dict(
+                            size=8,
+                            color=aircraft_colors,
+                            symbol='diamond',
+                            line=dict(width=2, color='white'),
+                            opacity=0.9
+                        ),
+                        text=aircraft_text,
+                        hoverinfo='text',
+                        name='Aircraft',
+                        showlegend=True
+                    ))
+
+                # Add flight routes as great circle paths
+                if all(col in tmp.columns for col in ['origin_lat', 'origin_lng', 'dest_lat', 'dest_lng']):
+                    for _, r in tmp.head(50).iterrows():  # Limit for performance
+                        if all(pd.notna([r['origin_lat'], r['origin_lng'], r['dest_lat'], r['dest_lng']])):
+                            # Create great circle path
+                            lat1, lng1 = np.radians([r['origin_lat'], r['origin_lng']])
+                            lat2, lng2 = np.radians([r['dest_lat'], r['dest_lng']])
+                            
+                            # Generate points along the great circle
+                            num_points = 50
+                            f = np.linspace(0, 1, num_points)
+                            
+                            # Simple linear interpolation for demo (avoiding complex spherical math)
+                            lat_path = lat1 + f * (lat2 - lat1)
+                            lng_path = lng1 + f * (lng2 - lng1)
+                            
+                            x_path, y_path, z_path = [], [], []
+                            for i in range(num_points):
+                                x, y, z = lat_lng_to_3d(np.degrees(lat_path[i]), np.degrees(lng_path[i]), radius=1.01)
+                                x_path.append(x)
+                                y_path.append(y)
+                                z_path.append(z)
+                            
+                            # Route color based on risk
+                            route_color = risk_color_map.get(r.get('risk_level', 'LOW'), "#6B7280")
+                            
+                            fig.add_trace(go.Scatter3d(
+                                x=x_path, y=y_path, z=z_path,
+                                mode='lines',
+                                line=dict(
+                                    width=3,
+                                    color=route_color,
+                                ),
+                                opacity=0.6,
+                                hoverinfo='skip',
+                                showlegend=False,
+                                name=f"{r.get('origin', '')} → {r.get('destination', '')}"
+                            ))
+
+                # Add airport markers for major hubs
+                airport_coords = [
+                    (28.5562, 77.1000, "DEL - Delhi"),
+                    (19.0896, 72.8656, "BOM - Mumbai"), 
+                    (13.1986, 77.7066, "BLR - Bangalore"),
+                    (12.9941, 80.1709, "MAA - Chennai"),
+                    (22.6547, 88.4467, "CCU - Kolkata"),
+                    (17.2403, 78.4294, "HYD - Hyderabad"),
+                    (10.1520, 76.4019, "COK - Kochi"),
+                    (23.0726, 72.6263, "AMD - Ahmedabad"),
+                    (18.5822, 73.9197, "PNQ - Pune")
+                ]
+                
+                airport_x, airport_y, airport_z, airport_text = [], [], [], []
+                for lat, lng, name in airport_coords:
+                    x, y, z = lat_lng_to_3d(lat, lng, radius=1.03)
+                    airport_x.append(x)
+                    airport_y.append(y)
+                    airport_z.append(z)
+                    airport_text.append(f"🏢 {name}")
+                
+                fig.add_trace(go.Scatter3d(
+                    x=airport_x, y=airport_y, z=airport_z,
+                    mode='markers',
+                    marker=dict(
+                        size=12,
+                        color='#FFD700',
+                        symbol='square',
+                        line=dict(width=2, color='black'),
+                    ),
+                    text=airport_text,
+                    hoverinfo='text',
+                    name='Major Airports',
+                    showlegend=True
+                ))
+
+                # Configure 3D scene
+                fig.update_layout(
+                    scene=dict(
+                        xaxis=dict(visible=False, range=[-1.5, 1.5]),
+                        yaxis=dict(visible=False, range=[-1.5, 1.5]),
+                        zaxis=dict(visible=False, range=[-1.5, 1.5]),
+                        camera=dict(
+                            eye=dict(x=1.5, y=1.5, z=1.5),
+                            center=dict(x=0, y=0, z=0),
+                            up=dict(x=0, y=0, z=1)
+                        ),
+                        bgcolor='rgba(5,12,24,1)',
+                        aspectmode='cube'
+                    ),
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    font_color='white',
+                    height=600,
+                    margin=dict(l=0, r=0, t=30, b=0),
+                    title=dict(
+                        text="🛡️ Guardian Eye - Real-Time Global Aviation Monitoring",
+                        x=0.5,
+                        font=dict(size=16, color='white')
+                    )
+                )
+
+                st.plotly_chart(fig, use_container_width=True, key="3d_globe")
             with col_globe:
                 # Enhanced 3D Globe
                 fig = go.Figure()
