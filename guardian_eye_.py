@@ -407,12 +407,7 @@ def create_guardian_eye_streamlit():
     else:
         df = pd.read_csv(csv_path)
 
-    # Debug: Show available columns
-    with st.expander("🔍 Debug Info"):
-        st.write("**Available columns:**", list(df.columns))
-        st.write("**Dataset shape:**", df.shape)
-        st.write("**Sample data:**")
-        st.dataframe(df.head(3))
+
 
     # Parse dates safely if present
     date_columns = ["scheduled_departure", "scheduled_arrival", "expected_arrival"]
@@ -468,10 +463,15 @@ def create_guardian_eye_streamlit():
         if sel_dest != "All Destinations":
             tmp = tmp[tmp["destination"] == sel_dest].copy()
 
-    # Current time display
+    # Current time display with auto-refresh
     current_time = datetime.now()
     st.sidebar.markdown("---")
-    st.sidebar.markdown(f"**Current Time:** {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    st.sidebar.markdown(f"**🕐 Current Time:** {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    # Auto-refresh every 30 seconds
+    st.sidebar.markdown("*Auto-refresh: 30s*")
+    if st.sidebar.button("🔄 Refresh Now"):
+        st.experimental_rerun()
 
     # Alert level based on risk
     if 'risk_level' in tmp.columns:
@@ -497,100 +497,373 @@ def create_guardian_eye_streamlit():
         </div>
         """, unsafe_allow_html=True)
 
-    # Main KPIs
-    col1, col2, col3, col4 = st.columns(4)
+    # Enhanced Main KPIs with real-time styling
+    st.markdown("### 📊 Real-Time Operations Dashboard")
+    col1, col2, col3, col4, col5 = st.columns(5)
     
     with col1:
-        st.metric("Total Flights", len(tmp), delta=None)
+        total_flights = len(tmp)
+        st.metric("🛫 Total Flights", total_flights, delta=None)
     
     with col2:
         if 'status' in tmp.columns:
             on_time = len(tmp[tmp["status"] == "ON-TIME"])
-            delayed = len(tmp[tmp["status"] == "DELAYED"])
-            st.metric("On-Time", on_time, delta=f"{on_time/len(tmp)*100:.1f}%" if len(tmp) > 0 else "0%")
+            on_time_pct = (on_time/len(tmp)*100) if len(tmp) > 0 else 0
+            delta_color = "normal" if on_time_pct >= 70 else "inverse"
+            st.metric("✅ On-Time", on_time, delta=f"{on_time_pct:.1f}%", delta_color=delta_color)
         else:
-            st.metric("On-Time", "N/A")
+            st.metric("✅ On-Time", "N/A")
     
     with col3:
-        if 'risk_level' in tmp.columns:
-            high_crit = len(tmp[tmp["risk_level"].isin(["HIGH","CRITICAL"])])
-            st.metric("High/Critical Risk", high_crit, delta="⚠️" if high_crit > 0 else "✅")
+        if 'status' in tmp.columns:
+            delayed = len(tmp[tmp["status"] == "DELAYED"])
+            delayed_pct = (delayed/len(tmp)*100) if len(tmp) > 0 else 0
+            delta_color = "inverse" if delayed_pct > 20 else "normal"
+            st.metric("⏱️ Delayed", delayed, delta=f"{delayed_pct:.1f}%", delta_color=delta_color)
         else:
-            st.metric("High/Critical Risk", "N/A")
+            st.metric("⏱️ Delayed", "N/A")
     
     with col4:
+        if 'risk_level' in tmp.columns:
+            high_crit = len(tmp[tmp["risk_level"].isin(["HIGH","CRITICAL"])])
+            risk_pct = (high_crit/len(tmp)*100) if len(tmp) > 0 else 0
+            delta_color = "inverse" if high_crit > 0 else "normal"
+            st.metric("⚠️ High Risk", high_crit, delta=f"{risk_pct:.1f}%", delta_color=delta_color)
+        else:
+            st.metric("⚠️ High Risk", "N/A")
+    
+    with col5:
         if 'delay_minutes' in tmp.columns:
             avg_delay = float(tmp["delay_minutes"].mean()) if len(tmp) > 0 else 0.0
-            st.metric("Avg Delay (min)", f"{avg_delay:.1f}")
+            delta_color = "inverse" if avg_delay > 15 else "normal"
+            st.metric("⏱️ Avg Delay", f"{avg_delay:.1f}m", delta_color=delta_color)
         else:
-            st.metric("Avg Delay (min)", "N/A")
+            st.metric("⏱️ Avg Delay", "N/A")
+
+    # Real-time alert banner
+    if 'risk_level' in tmp.columns:
+        critical_flights = tmp[tmp['risk_level'] == 'CRITICAL']
+        if len(critical_flights) > 0:
+            st.error(f"🚨 CRITICAL ALERT: {len(critical_flights)} flights require immediate attention!")
+            with st.expander("View Critical Flights"):
+                critical_display = critical_flights[['flight_id', 'airline', 'aircraft_type', 'origin', 'destination', 'delay_minutes']].head(10)
+                st.dataframe(critical_display, use_container_width=True)
 
     st.markdown("---")
 
-    # 3D Globe Map
-    if len(tmp) > 0 and all(col in tmp.columns for col in ['current_lat', 'current_lng', 'origin_lat', 'origin_lng', 'dest_lat', 'dest_lng']):
-        st.markdown("### 🌍 Global Flight Tracking")
+    # Enhanced 3D Globe with Real World Visualization
+    if len(tmp) > 0:
+        st.markdown("### 🌍 Guardian Eye - Global Flight Tracking")
         
-        fig = go.Figure()
+        # Create tabs for different views
+        tab1, tab2 = st.tabs(["🌐 3D Globe View", "🗺️ Map View"])
+        
+        with tab1:
+            # Add legend and controls
+            col_globe, col_legend = st.columns([4, 1])
+            
+            with col_legend:
+                st.markdown("#### 🎯 Legend")
+                st.markdown("""
+                **Aircraft Risk Levels:**
+                - 🔴 Critical (70%+)
+                - 🟡 High (50-70%)
+                - 🔵 Medium (30-50%)
+                - 🟢 Low (<30%)
+                
+                **Symbols:**
+                - 💎 Aircraft Position
+                - 🟨 Major Airports
+                - ➖ Flight Routes
+                
+                **Controls:**
+                - Rotate: Click & Drag
+                - Zoom: Mouse Wheel
+                - Pan: Shift + Drag
+                """)
+                
+                # Flight statistics
+                if 'risk_level' in tmp.columns:
+                    st.markdown("#### 📈 Live Stats")
+                    risk_counts = tmp['risk_level'].value_counts()
+                    for risk, count in risk_counts.items():
+                        color = {"CRITICAL": "🔴", "HIGH": "🟡", "MEDIUM": "🔵", "LOW": "🟢"}.get(risk, "⚪")
+                        st.write(f"{color} {risk}: {count}")
+            
+            with col_globe:
+            with col_globe:
+                # Enhanced 3D Globe
+                fig = go.Figure()
 
-        # Flight routes as lines
-        for _, r in tmp.head(100).iterrows():  # Limit for performance
-            try:
-                fig.add_trace(go.Scattergeo(
-                    lon=[r["origin_lng"], r["dest_lng"]],
-                    lat=[r["origin_lat"], r["dest_lat"]],
-                    mode="lines",
-                    line=dict(width=1, color="rgba(100,150,255,0.4)"),
-                    hoverinfo="skip",
+                # Add Earth sphere as base
+                u = np.linspace(0, 2 * np.pi, 50)
+                v = np.linspace(0, np.pi, 50)
+                x_sphere = np.outer(np.cos(u), np.sin(v))
+                y_sphere = np.outer(np.sin(u), np.sin(v))
+                z_sphere = np.outer(np.ones(np.size(u)), np.cos(v))
+                
+                fig.add_trace(go.Surface(
+                    x=x_sphere, y=y_sphere, z=z_sphere,
+                    colorscale='Earth',
+                    showscale=False,
+                    opacity=0.8,
+                    name="Earth"
+                ))
+
+                # Convert lat/lng to 3D coordinates for aircraft positions
+                def lat_lng_to_3d(lat, lng, radius=1.02):
+                    lat_rad = np.radians(lat)
+                    lng_rad = np.radians(lng)
+                    x = radius * np.cos(lat_rad) * np.cos(lng_rad)
+                    y = radius * np.cos(lat_rad) * np.sin(lng_rad)
+                    z = radius * np.sin(lat_rad)
+                    return x, y, z
+
+                # Aircraft positions on the globe
+                if all(col in tmp.columns for col in ['current_lat', 'current_lng', 'risk_level']):
+                    aircraft_x, aircraft_y, aircraft_z = [], [], []
+                    aircraft_colors, aircraft_text = [], []
+                    
+                    risk_color_map = {
+                        "CRITICAL": "#DC2626",
+                        "HIGH": "#F59E0B", 
+                        "MEDIUM": "#3B82F6",
+                        "LOW": "#10B981"
+                    }
+                    
+                    for _, r in tmp.iterrows():
+                        if pd.notna(r['current_lat']) and pd.notna(r['current_lng']):
+                            x, y, z = lat_lng_to_3d(r['current_lat'], r['current_lng'])
+                            aircraft_x.append(x)
+                            aircraft_y.append(y) 
+                            aircraft_z.append(z)
+                            
+                            color = risk_color_map.get(r.get('risk_level', 'LOW'), "#6B7280")
+                            aircraft_colors.append(color)
+                            
+                            text = f"✈️ {r.get('flight_id', 'Unknown')}<br>"
+                            text += f"🏢 {r.get('airline', 'Unknown')}<br>"
+                            text += f"📍 {r.get('origin', '')} → {r.get('destination', '')}<br>"
+                            text += f"⚠️ Risk: {r.get('risk_level', 'Unknown')}<br>"
+                            text += f"⏱️ Delay: {r.get('delay_minutes', 0)} min<br>"
+                            text += f"✈️ Type: {r.get('aircraft_type', 'Unknown')}"
+                            aircraft_text.append(text)
+
+                    # Add aircraft markers
+                    fig.add_trace(go.Scatter3d(
+                        x=aircraft_x, y=aircraft_y, z=aircraft_z,
+                        mode='markers',
+                        marker=dict(
+                            size=8,
+                            color=aircraft_colors,
+                            symbol='diamond',
+                            line=dict(width=2, color='white'),
+                            opacity=0.9
+                        ),
+                        text=aircraft_text,
+                        hoverinfo='text',
+                        name='Aircraft',
+                        showlegend=True
+                    ))
+
+                # Add flight routes as great circle paths
+                if all(col in tmp.columns for col in ['origin_lat', 'origin_lng', 'dest_lat', 'dest_lng']):
+                    for _, r in tmp.head(50).iterrows():  # Limit for performance
+                        if all(pd.notna([r['origin_lat'], r['origin_lng'], r['dest_lat'], r['dest_lng']])):
+                            # Create great circle path
+                            lat1, lng1 = np.radians([r['origin_lat'], r['origin_lng']])
+                            lat2, lng2 = np.radians([r['dest_lat'], r['dest_lng']])
+                            
+                            # Generate points along the great circle
+                            num_points = 50
+                            f = np.linspace(0, 1, num_points)
+                            
+                            # Spherical interpolation
+                            A = np.sin((1-f) * np.arccos(np.sin(lat1)*np.sin(lat2) + np.cos(lat1)*np.cos(lat2)*np.cos(lng2-lng1))) / np.sin(np.arccos(np.sin(lat1)*np.sin(lat2) + np.cos(lat1)*np.cos(lat2)*np.cos(lng2-lng1)))
+                            B = np.sin(f * np.arccos(np.sin(lat1)*np.sin(lat2) + np.cos(lat1)*np.cos(lat2)*np.cos(lng2-lng1))) / np.sin(np.arccos(np.sin(lat1)*np.sin(lat2) + np.cos(lat1)*np.cos(lat2)*np.cos(lng2-lng1)))
+                            
+                            # Handle edge cases
+                            A = np.nan_to_num(A, nan=1.0)
+                            B = np.nan_to_num(B, nan=0.0)
+                            
+                            x_path, y_path, z_path = [], [], []
+                            for i in range(num_points):
+                                lat_i = A[i] * lat1 + B[i] * lat2
+                                lng_i = A[i] * lng1 + B[i] * lng2
+                                
+                                x, y, z = lat_lng_to_3d(np.degrees(lat_i), np.degrees(lng_i), radius=1.01)
+                                x_path.append(x)
+                                y_path.append(y)
+                                z_path.append(z)
+                            
+                            # Route color based on risk
+                            route_color = risk_color_map.get(r.get('risk_level', 'LOW'), "#6B7280")
+                            
+                            fig.add_trace(go.Scatter3d(
+                                x=x_path, y=y_path, z=z_path,
+                                mode='lines',
+                                line=dict(
+                                    width=3,
+                                    color=route_color,
+                                ),
+                                opacity=0.6,
+                                hoverinfo='skip',
+                                showlegend=False,
+                                name=f"{r.get('origin', '')} → {r.get('destination', '')}"
+                            ))
+
+                # Add airport markers for major hubs
+                airport_coords = [
+                    (28.5562, 77.1000, "DEL - Delhi"),
+                    (19.0896, 72.8656, "BOM - Mumbai"), 
+                    (13.1986, 77.7066, "BLR - Bangalore"),
+                    (12.9941, 80.1709, "MAA - Chennai"),
+                    (22.6547, 88.4467, "CCU - Kolkata"),
+                    (17.2403, 78.4294, "HYD - Hyderabad")
+                ]
+                
+                airport_x, airport_y, airport_z, airport_text = [], [], [], []
+                for lat, lng, name in airport_coords:
+                    x, y, z = lat_lng_to_3d(lat, lng, radius=1.03)
+                    airport_x.append(x)
+                    airport_y.append(y)
+                    airport_z.append(z)
+                    airport_text.append(f"🏢 {name}")
+                
+                fig.add_trace(go.Scatter3d(
+                    x=airport_x, y=airport_y, z=airport_z,
+                    mode='markers',
+                    marker=dict(
+                        size=12,
+                        color='#FFD700',
+                        symbol='square',
+                        line=dict(width=2, color='black'),
+                    ),
+                    text=airport_text,
+                    hoverinfo='text',
+                    name='Major Airports',
+                    showlegend=True
+                ))
+
+                # Configure 3D scene
+                fig.update_layout(
+                    scene=dict(
+                        xaxis=dict(visible=False, range=[-1.5, 1.5]),
+                        yaxis=dict(visible=False, range=[-1.5, 1.5]),
+                        zaxis=dict(visible=False, range=[-1.5, 1.5]),
+                        camera=dict(
+                            eye=dict(x=1.5, y=1.5, z=1.5),
+                            center=dict(x=0, y=0, z=0),
+                            up=dict(x=0, y=0, z=1)
+                        ),
+                        bgcolor='rgba(5,12,24,1)',
+                        aspectmode='cube'
+                    ),
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    font_color='white',
+                    height=600,
+                    margin=dict(l=0, r=0, t=30, b=0),
+                    title=dict(
+                        text="🛡️ Guardian Eye - Real-Time Global Aviation Monitoring",
+                        x=0.5,
+                        font=dict(size=16, color='white')
+                    )
+                )
+
+                st.plotly_chart(fig, use_container_width=True, key="3d_globe")
+        
+        with tab2:
+            # Traditional 2D Map View
+            fig_map = go.Figure()
+
+            # Flight routes as lines on map
+            for _, r in tmp.head(100).iterrows():
+                if all(pd.notna([r.get('origin_lat'), r.get('origin_lng'), r.get('dest_lat'), r.get('dest_lng')])):
+                    fig_map.add_trace(go.Scattergeo(
+                        lon=[r["origin_lng"], r["dest_lng"]],
+                        lat=[r["origin_lat"], r["dest_lat"]],
+                        mode="lines",
+                        line=dict(width=2, color="rgba(59,130,246,0.5)"),
+                        hoverinfo="skip",
+                        showlegend=False
+                    ))
+
+            # Aircraft current positions
+            if all(col in tmp.columns for col in ['current_lat', 'current_lng', 'risk_level']):
+                color_map = {"LOW":"#10B981","MEDIUM":"#3B82F6","HIGH":"#F59E0B","CRITICAL":"#DC2626"}
+                
+                hover_text = []
+                for _, r in tmp.iterrows():
+                    text = f"✈️ {r.get('flight_id', 'Unknown')} | {r.get('airline', 'Unknown')}<br>"
+                    text += f"📍 {r.get('origin', 'Unknown')} → {r.get('destination', 'Unknown')}<br>"
+                    text += f"⚠️ Risk: {r.get('risk_level', 'Unknown')} | ⏱️ Delay: {r.get('delay_minutes', 0)} min<br>"
+                    text += f"✈️ {r.get('aircraft_type', 'Unknown')} | 🏷️ {r.get('tail_number', 'Unknown')}"
+                    hover_text.append(text)
+                
+                fig_map.add_trace(go.Scattergeo(
+                    lon=tmp["current_lng"],
+                    lat=tmp["current_lat"],
+                    text=hover_text,
+                    mode="markers",
+                    marker=dict(
+                        size=10,
+                        color=[color_map.get(risk, "#6B7280") for risk in tmp["risk_level"]],
+                        line=dict(width=2, color="white"),
+                        symbol="triangle-up"
+                    ),
+                    hoverinfo="text",
+                    name="Aircraft",
+                    showlegend=True
+                ))
+
+            # Add airport markers
+            for code, info in AIRPORTS.items():
+                fig_map.add_trace(go.Scattergeo(
+                    lon=[info['lng']],
+                    lat=[info['lat']],
+                    text=f"🏢 {code} - {info['name']}",
+                    mode="markers",
+                    marker=dict(
+                        size=15,
+                        color='gold',
+                        symbol='square',
+                        line=dict(width=2, color='black')
+                    ),
+                    hoverinfo="text",
                     showlegend=False
                 ))
-            except:
-                continue
 
-        # Aircraft current positions
-        if 'risk_level' in tmp.columns:
-            color_map = {"LOW":"#10B981","MEDIUM":"#3B82F6","HIGH":"#F59E0B","CRITICAL":"#DC2626"}
+            fig_map.update_geos(
+                projection_type="natural earth",
+                showcountries=True,
+                showcoastlines=True,
+                showland=True,
+                landcolor="rgb(230,230,230)",
+                showocean=True,
+                oceancolor="rgb(50,50,200)",
+                showlakes=True,
+                lakecolor="rgb(0,100,200)",
+                center=dict(lat=20, lon=77),  # Center on India
+                scope="asia"
+            )
             
-            hover_text = []
-            for _, r in tmp.iterrows():
-                text = f"{r.get('flight_id', 'Unknown')} | {r.get('airline', 'Unknown')}<br>"
-                text += f"{r.get('origin', 'Unknown')} → {r.get('destination', 'Unknown')}<br>"
-                text += f"Risk: {r.get('risk_level', 'Unknown')} | Delay: {r.get('delay_minutes', 0)} min"
-                hover_text.append(text)
+            fig_map.update_layout(
+                margin=dict(l=0, r=0, t=30, b=0),
+                height=500,
+                paper_bgcolor='rgba(0,0,0,0)',
+                plot_bgcolor='rgba(0,0,0,0)',
+                font_color='white',
+                title=dict(
+                    text="🗺️ Guardian Eye - Regional Flight Map",
+                    x=0.5,
+                    font=dict(size=16, color='white')
+                )
+            )
             
-            fig.add_trace(go.Scattergeo(
-                lon=tmp["current_lng"],
-                lat=tmp["current_lat"],
-                text=hover_text,
-                mode="markers",
-                marker=dict(
-                    size=8,
-                    color=[color_map.get(risk, "#6B7280") for risk in tmp["risk_level"]],
-                    line=dict(width=1, color="white")
-                ),
-                hoverinfo="text",
-                name="Aircraft",
-                showlegend=False
-            ))
-
-        fig.update_geos(
-            projection_type="orthographic",
-            showcountries=True,
-            showcoastlines=True,
-            showland=True,
-            landcolor="rgb(20,30,40)",
-            oceancolor="rgb(5,12,24)",
-            showocean=True,
-            lataxis_showgrid=True,
-            lonaxis_showgrid=True,
-        )
-        fig.update_layout(
-            margin=dict(l=0, r=0, t=0, b=0),
-            height=400,
-            plot_bgcolor='rgba(0,0,0,0)',
-            paper_bgcolor='rgba(0,0,0,0)'
-        )
-        st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig_map, use_container_width=True, key="2d_map")
+    else:
+        st.info("🔍 No flights match current filters - adjust filter settings to view aircraft")
 
     # Flight Schedule Table
     st.markdown("### ✈️ Flight Schedule Monitor")
